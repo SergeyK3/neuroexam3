@@ -112,4 +112,4 @@ pytest tests/ -v
 - [ ] Replace word-overlap scorer with sentence-transformer embeddings
 - [ ] Add Telegram / Discord bot
 - [ ] Add question bank management endpoints
-- [ ] Dockerise the application
+- [ ] Dockerize the application
