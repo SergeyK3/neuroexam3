@@ -1,32 +1,43 @@
-"""Speech recognition service.
+"""Распознавание речи: OpenAI Whisper (если задан OPENAI_API_KEY), иначе заглушка."""
 
-Placeholder implementation that converts audio bytes to text.
-Replace the body of ``transcribe`` with a real STT backend
-(e.g. OpenAI Whisper, Google Speech-to-Text, Vosk, etc.).
-"""
-
+import io
 import logging
+
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 async def transcribe(audio_bytes: bytes, *, language: str = "ru") -> str:
-    """Convert raw audio bytes to a text transcript.
+    """Сырой звук (OGG/OPUS от Telegram и т.д.) → текст."""
+    if not audio_bytes:
+        raise ValueError("Пустой аудиофайл.")
 
-    Args:
-        audio_bytes: Raw audio data (OGG/OPUS as received from Telegram).
-        language: BCP-47 language code for the expected language.
+    if not settings.openai_api_key:
+        logger.warning(
+            "OPENAI_API_KEY не задан — транскрипция-заглушка (%s байт, lang=%s)",
+            len(audio_bytes),
+            language,
+        )
+        return "[Нет ключа OpenAI: задайте OPENAI_API_KEY в .env для Whisper]"
 
-    Returns:
-        Recognized text string.
+    try:
+        from openai import AsyncOpenAI
+    except ImportError as e:
+        raise RuntimeError("Установите пакет openai: pip install openai") from e
 
-    Raises:
-        RuntimeError: When the underlying STT call fails.
-    """
-    # TODO: replace with a real speech-to-text implementation.
-    logger.warning(
-        "transcribe() is a placeholder — received %d bytes of audio (language=%s)",
-        len(audio_bytes),
-        language,
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    buf = io.BytesIO(audio_bytes)
+    buf.name = "voice.ogg"
+
+    lang = language if language in ("ru", "kk", "en") else "ru"
+
+    tr = await client.audio.transcriptions.create(
+        model=settings.speech_model,
+        file=buf,
+        language=lang,
     )
-    return "placeholder transcript"
+    text = (tr.text or "").strip()
+    if not text:
+        raise RuntimeError("Whisper вернул пустой текст.")
+    return text

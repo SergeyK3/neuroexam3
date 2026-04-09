@@ -1,0 +1,26 @@
+# Пример: API + Redis + воркер arq (очередь для вебхука Telegram).
+# Запуск из корня репозитория: docker compose up --build
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis
+
+  worker:
+    build: .
+    command: arq app.workers.worker_settings.WorkerSettings
+    env_file: .env
+    environment:
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      - redis

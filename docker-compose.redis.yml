@@ -1,0 +1,8 @@
+# Только Redis для локальной разработки (API и arq — на хосте с тем же .env).
+# Запуск: docker compose -f docker-compose.redis.yml up -d
+# Остановка: docker compose -f docker-compose.redis.yml down
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

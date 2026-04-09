@@ -12,9 +12,16 @@ httpx>=0.27.0
 # Telegram bot (uncomment and pin when implementing the bot)
 # python-telegram-bot>=21.0
 
-# Speech recognition — choose one backend and uncomment:
-# openai>=1.0.0          # Whisper via OpenAI API
+# Whisper (STT) via OpenAI API — нужен OPENAI_API_KEY в .env
+openai>=1.40.0
+
+# Google Sheets (эталоны с листа ideal answers)
+gspread>=6.0.0
+google-auth>=2.29.0
 # SpeechRecognition>=3.10.0  # local / Google STT
+
+# Очередь задач (Redis + arq) — опционально, см. REDIS_URL в .env
+arq>=0.26.0
 
 # Testing
 pytest>=8.0.0
