@@ -199,15 +199,15 @@ def build_result_row(
     session_id: str,
     discipline_slug: str,
     question_key: str,
-    score: float,
+    score_display: str,
     answer_excerpt: str,
 ) -> list[Any]:
-    """Одна строка для student_answers (без эталонов)."""
+    """Одна строка для student_answers (без эталонов). score_display — балл 0–100 или сходство 0–1 как строка."""
     ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     excerpt = (answer_excerpt or "").strip()
     if len(excerpt) > 2000:
         excerpt = excerpt[:2000] + "…"
-    return [ts, str(telegram_user_id), session_id, discipline_slug, question_key, f"{score:.4f}", excerpt]
+    return [ts, str(telegram_user_id), session_id, discipline_slug, question_key, score_display, excerpt]
 
 
 def append_with_retries(

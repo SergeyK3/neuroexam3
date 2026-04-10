@@ -17,27 +17,41 @@ async def export_question_scores(
     discipline_id: str | None,
     telegram_user_id: int,
     session_id: str,
-    scored_rows: list[tuple[str, float, str]],
+    scored_rows: list[tuple[str, str, str]],
 ) -> None:
     """
-    Для каждой оценённой пары (ключ, score, фрагмент ответа) — append строки.
+    Для каждой оценённой пары (ключ, score_display, фрагмент ответа) — append строки.
     При отсутствии credentials / id таблицы — no-op.
     """
     creds = settings.google_creds_path()
     sheet_id = reference_map_service.spreadsheet_id_for_discipline(discipline_id)
     tab = (settings.google_sheet_results_tab or "student_answers").strip() or "student_answers"
     if not creds or not sheet_id:
+        if not creds:
+            logger.warning(
+                "Результаты в Google Sheets не записаны: не задан путь к ключу сервисного аккаунта "
+                "(GOOGLE_SHEETS_CREDENTIALS или GOOGLE_APPLICATION_CREDENTIALS). "
+                "Строк для экспорта: %s.",
+                len(scored_rows),
+            )
+        if not sheet_id:
+            logger.warning(
+                "Результаты в Google Sheets не записаны: не задан id таблицы "
+                "(GOOGLE_SHEET_ID или DISCIPLINE_GOOGLE_SHEET_IDS_JSON для дисциплины). "
+                "Строк для экспорта: %s.",
+                len(scored_rows),
+            )
         return
 
     slug = (discipline_id or settings.default_discipline or "").strip() or "-"
 
-    for question_key, score, excerpt in scored_rows:
+    for question_key, score_display, excerpt in scored_rows:
         row = sheets_client.build_result_row(
             telegram_user_id=telegram_user_id,
             session_id=session_id,
             discipline_slug=slug,
             question_key=question_key,
-            score=score,
+            score_display=score_display,
             answer_excerpt=excerpt,
         )
         try:
