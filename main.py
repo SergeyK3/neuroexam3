@@ -35,8 +35,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="NeuroExam3",
     description=(
-        "Accepts a student's voice answer, converts speech to text, "
-        "compares it with a reference answer and returns a similarity score."
+        "Exam pipeline: voice/text → optional rubric scoring (0–100 by fields) or string similarity (0–1)."
     ),
     version="0.1.0",
     lifespan=lifespan,

@@ -99,16 +99,59 @@ uvicorn main:app --reload --port 8000
 ## Telegram: вебхук
 
 1. Приложение должно быть доступно по **HTTPS** (деплой или туннель: ngrok, cloudflare tunnel и т.д.).
-2. URL вебхука в этом проекте: **`https://<ваш-хост>/telegram/webhook`**.
-3. Рекомендуется задать секрет и тот же секрет в `.env` как `TELEGRAM_WEBHOOK_SECRET`.
+2. Путь у приложения фиксированный: **`/telegram/webhook`** (см. `app/api/telegram_webhook.py`). Полный адрес для Telegram всегда: **`https://<публичный-домен>/telegram/webhook`**.
 
-Пример (подставьте токен и URL; `secret_token` — произвольная строка, её же укажите в `.env`):
+### Что значит «ваш-хост» и откуда взять адрес (ngrok)
 
-```text
-https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://example.com/telegram/webhook&secret_token=<случайная_строка>
+В документации **`<ваш-хост>` — не переменная в коде и не отдельный файл**. Это **домен, который выдаёт ngrok** в окне терминала.
+
+**Windows — важно:** команда `ngrok http 8000` часто шлёт трафик на `localhost`, который резолвится в **IPv6 (`::1`)**. На `::1:8000` может сидеть **другой** процесс, не ваш FastAPI — тогда Telegram получит **404** (`Wrong response from the webhook: 404 Not Found`), а бот молчит. Запускайте туннель **явно на IPv4:**
+
+```bash
+ngrok http http://127.0.0.1:8000
 ```
 
-Проверка: Telegram шлёт `POST` с заголовком `X-Telegram-Bot-Api-Secret-Token`, если секрет задан. Локальный `http://127.0.0.1` без туннеля к Telegram **не подключить** — это ограничение Bot API.
+Проверка: в браузере откройте `http://127.0.0.1:8000/health` — должно быть `{"status":"ok"}`. Если `http://localhost:8000/health` даёт **другой** ответ — используйте только **127.0.0.1** для uvicorn/ngrok, пока не разберётесь с конфликтом порта.
+
+1. В одном терминале крутится **`uvicorn`** на порту **8000** (и при необходимости Redis + `arq`).
+2. Во втором терминале: **`ngrok http http://127.0.0.1:8000`** (не просто `8000`, если на Windows ловите 404 через туннель).
+3. В таблице ngrok найдите строку **Forwarding**. Слева будет что-то вроде:
+   - `https://untamed-bearlike-xxxx.ngrok-free.app` (у вас будет **свой** поддомен, каждый запуск на бесплатном плане может отличаться).
+
+**Этот `https://....ngrok-free.app` и есть «хост»** — его **целиком копируете** (со схемой `https://`, без слэша в конце). Дальше **дописываете путь приложения**:
+
+```text
+https://untamed-bearlike-xxxx.ngrok-free.app/telegram/webhook
+```
+
+Подставьте **свой** URL из ngrok вместо примера. Строки вроде **`example.com`** в старых примерах — это **иллюстрация**, не реальный адрес.
+
+**Отдельной команды «webhook» в терминале нет.** Третий терминал не обязателен: вебхук настраивается **одним** запросом к API Telegram (ниже) или через браузер. Дополнительно можно открыть в браузере веб-интерфейс ngrok: `http://127.0.0.1:4040` — там видны входящие запросы к туннелю.
+
+### Секрет вебхука и ошибка 401
+
+- Если в `.env` задан **`TELEGRAM_WEBHOOK_SECRET`**, то при вызове **`setWebhook`** нужно передать **тот же** секрет параметром **`secret_token`**, иначе Telegram не пришлёт нужный заголовок → ответ API **`401 Invalid webhook secret`**.
+- Если секрет в `.env` **пустой**, проверка заголовка **не выполняется** — тогда `setWebhook` можно вызывать **без** `secret_token` (удобно для первого теста).
+
+### Вызов setWebhook
+
+Подставьте **токен бота** и **полный HTTPS URL** вебхука (из ngrok + `/telegram/webhook`). Без секрета:
+
+```text
+https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://ВАШ-ДОМЕН-ИЗ-NGROK/telegram/webhook
+```
+
+С секретом (строка `secret` должна совпадать с `TELEGRAM_WEBHOOK_SECRET` в `.env`):
+
+```text
+https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/setWebhook?url=https://ВАШ-ДОМЕН-ИЗ-NGROK/telegram/webhook&secret_token=ВАШ_СЕКРЕТ
+```
+
+Проверка: `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getWebhookInfo`
+
+Повторно выставить вебхук после смены URL ngrok: из корня репозитория **`python scripts/set_webhook_via_ngrok.py`** (нужны запущенные ngrok и запись в `.env`).
+
+Telegram шлёт `POST` с заголовком `X-Telegram-Bot-Api-Secret-Token`, если при `setWebhook` был задан `secret_token`. Локальный `http://127.0.0.1` без туннеля к Telegram **не подключить** — это ограничение Bot API.
 
 ---
 
