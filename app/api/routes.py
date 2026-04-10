@@ -18,19 +18,30 @@ async def evaluate_voice(
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
     language: Annotated[str, Form(description="BCP-47 language code")] = "ru",
 ):
-    """Accept a voice recording and return a similarity score.
-
-    Steps:
-    1. Read the uploaded audio file.
-    2. Transcribe speech to text.
-    3. Compare the transcript against the reference answer.
-    4. Return the score together with the recognised transcript.
-    """
+    """Распознавание речи и оценка: рубрика (JSON) или семантическое сходство 0–1 по эмбеддингам (нужен OPENAI_API_KEY)."""
     audio_bytes = await audio.read()
     transcript = await speech_service.transcribe(audio_bytes, language=language)
-    score = await evaluation_service.evaluate(transcript, reference)
 
+    if evaluation_service.use_rubric_scoring():
+        r = await evaluation_service.evaluate_rubric(transcript, reference)
+        return {
+            "mode": "rubric",
+            "transcript": transcript,
+            "reference": reference,
+            "content_score": r.content_score,
+            "accuracy_score": r.accuracy_score,
+            "structure_score": r.structure_score,
+            "conciseness_score": r.conciseness_score,
+            "total": r.total,
+            "content_rationale": r.content_rationale,
+            "accuracy_rationale": r.accuracy_rationale,
+            "structure_rationale": r.structure_rationale,
+            "conciseness_rationale": r.conciseness_rationale,
+        }
+
+    score = await evaluation_service.evaluate_similarity(transcript, reference)
     return {
+        "mode": "similarity",
         "transcript": transcript,
         "reference": reference,
         "score": score,
@@ -42,10 +53,27 @@ async def evaluate_text(
     student_answer: Annotated[str, Form(description="Student answer as plain text")],
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
 ):
-    """Accept a text answer and return a similarity score (no STT step)."""
-    score = await evaluation_service.evaluate(student_answer, reference)
+    """Текстовый ответ: рубрика или семантическое сходство по эмбеддингам — как у голоса."""
+    if evaluation_service.use_rubric_scoring():
+        r = await evaluation_service.evaluate_rubric(student_answer, reference)
+        return {
+            "mode": "rubric",
+            "student_answer": student_answer,
+            "reference": reference,
+            "content_score": r.content_score,
+            "accuracy_score": r.accuracy_score,
+            "structure_score": r.structure_score,
+            "conciseness_score": r.conciseness_score,
+            "total": r.total,
+            "content_rationale": r.content_rationale,
+            "accuracy_rationale": r.accuracy_rationale,
+            "structure_rationale": r.structure_rationale,
+            "conciseness_rationale": r.conciseness_rationale,
+        }
 
+    score = await evaluation_service.evaluate_similarity(student_answer, reference)
     return {
+        "mode": "similarity",
         "student_answer": student_answer,
         "reference": reference,
         "score": score,

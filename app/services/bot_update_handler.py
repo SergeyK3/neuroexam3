@@ -3,6 +3,7 @@
 import logging
 import re
 import time
+import unicodedata
 from typing import Any
 
 from app.core.config import settings
@@ -11,21 +12,110 @@ from app.models.session import ExamSession, ExamState
 from app.services import (
     evaluation_service,
     fsm_service,
+    reference_map_service,
     results_export_service,
     segmentation_service,
     session_service,
     speech_service,
 )
+from app.services.evaluation_service import RubricScores
 
 logger = logging.getLogger(__name__)
 
 _START_RE = re.compile(r"^/start(?:@\w+)?(?:\s|$)", re.IGNORECASE)
 
 
+def _normalize_user_text(text: str) -> str:
+    """NFC + убрать невидимые символы (ZWSP и т.д.), мешающие распознать /start."""
+    t = unicodedata.normalize("NFC", text).strip()
+    return re.sub(r"[\u200b\u200c\u200d\ufeff]", "", t)
+_Q_LABEL = re.compile(r"^Q(\d+)$", re.IGNORECASE)
+
+
+def _display_key_label(key: str) -> str:
+    m = _Q_LABEL.match(key.strip())
+    if m:
+        return f"Вопрос {m.group(1)}"
+    return key
+
+
+def _rubric_lines(label: str, r: RubricScores) -> list[str]:
+    lines = [
+        f"• {label}:",
+        f"  — полнота: {r.content_score}/60",
+        f"  — точность: {r.accuracy_score}/20",
+        f"  — структура: {r.structure_score}/10",
+        f"  — отсутствие лишнего: {r.conciseness_score}/10",
+        f"  — итого: {r.total}/100",
+    ]
+    rationale_parts: list[str] = []
+    if (r.content_rationale or "").strip():
+        rationale_parts.append(f"  — Полнота: {_truncate_block(r.content_rationale, 900)}")
+    if (r.accuracy_rationale or "").strip():
+        rationale_parts.append(f"  — Точность: {_truncate_block(r.accuracy_rationale, 900)}")
+    if (r.structure_rationale or "").strip():
+        rationale_parts.append(f"  — Структура: {_truncate_block(r.structure_rationale, 900)}")
+    if (r.conciseness_rationale or "").strip():
+        rationale_parts.append(f"  — Без лишнего: {_truncate_block(r.conciseness_rationale, 900)}")
+    if rationale_parts:
+        lines.append("  Обоснование:")
+        lines.extend(rationale_parts)
+    return lines
+
+
+def _truncate_block(text: str, max_len: int = 2000) -> str:
+    t = text.strip()
+    if len(t) <= max_len:
+        return t
+    return t[:max_len] + "…"
+
+
+def _mean_formula_rubric(totals: list[int], mean: float) -> str:
+    if not totals:
+        return ""
+    parts = " + ".join(str(t) for t in totals)
+    n = len(totals)
+    return f"({parts}) / {n} = {mean:.1f}"
+
+
+def _mean_formula_similarity(scores: list[float], mean: float) -> str:
+    if not scores:
+        return ""
+    parts = " + ".join(f"{s:.4f}" for s in scores)
+    n = len(scores)
+    return f"({parts}) / {n} = {mean:.4f}"
+
+
+def _preview_recognized_text(
+    transcript: str,
+    parts: dict[str, str],
+    keys: list[str],
+    *,
+    max_len: int = 1200,
+) -> str:
+    """Для нескольких фрагментов — пустая строка между блоками; иначе исходный транскрипт."""
+    chunks: list[str] = []
+    for k in keys:
+        seg = (parts.get(k) or "").strip()
+        if seg:
+            chunks.append(seg)
+    text = "\n\n".join(chunks) if len(chunks) >= 2 else transcript.strip()
+    if len(text) > max_len:
+        return text[:max_len] + "…"
+    return text
+
+
 def _is_start_command(text: str | None) -> bool:
     if not text:
         return False
-    return bool(_START_RE.match(text.strip()))
+    t = _normalize_user_text(text)
+    if _START_RE.match(t):
+        return True
+    parts = t.split()
+    if not parts:
+        return False
+    head = parts[0].lower()
+    return head == "/start" or head.startswith("/start@")
 
 
 async def _evaluate_and_reply(
@@ -35,7 +125,6 @@ async def _evaluate_and_reply(
     telegram_user_id: int,
     session_id: str,
     discipline_id: str | None = None,
-    preview_heading: str = "Распознано / ответ:",
 ) -> None:
     """Сегментация по ключам (Google Sheets или .env), оценка каждого непустого фрагмента."""
     try:
@@ -58,32 +147,79 @@ async def _evaluate_and_reply(
         use_llm=settings.mvp_segmentation_use_llm,
     )
 
-    lines: list[str] = ["Оценка по ключам (MVP, 0…1):"]
-    scored: list[tuple[str, float, str]] = []
+    has_openai = bool((settings.openai_api_key or "").strip())
+    if not has_openai:
+        lines = [
+            "Оценка недоступна: в .env задайте OPENAI_API_KEY.",
+            "Без ключа нельзя ни рубрику по полям, ни семантическое сравнение по эмбеддингам.",
+        ]
+        if notes:
+            lines.append("")
+            lines.append("Примечание:")
+            lines.extend(notes)
+        preview = _preview_recognized_text(transcript, parts, keys)
+        lines.append("")
+        lines.append(preview)
+        await telegram_client.send_message(chat_id, "\n".join(lines))
+        return
+
+    use_rubric = evaluation_service.use_rubric_scoring()
+
+    scored: list[tuple[str, str, str]] = []
+    rubric_totals: list[int] = []
+    sim_scores: list[float] = []
+
+    lines: list[str] = []
+
+    first_answer = True
     for key in keys:
         seg = (parts.get(key) or "").strip()
         ref = ref_map[key]
         if not seg:
-            lines.append(f"• {key}: нет фрагмента — пропуск")
             continue
-        try:
-            score = await evaluation_service.evaluate(seg, ref)
-        except ValueError as e:
-            lines.append(f"• {key}: ошибка оценки: {e}")
-            continue
-        lines.append(f"• {key}: {score:.4f}")
-        scored.append((key, score, seg))
+        label = _display_key_label(key)
+        if not first_answer:
+            lines.append("")
+        lines.append(_truncate_block(seg))
+        lines.append("")
+
+        if use_rubric:
+            try:
+                r = await evaluation_service.evaluate_rubric(seg, ref)
+            except (ValueError, RuntimeError) as e:
+                lines.append(f"• {label}: ошибка оценки: {e}")
+                first_answer = False
+                continue
+            lines.extend(_rubric_lines(label, r))
+            rubric_totals.append(r.total)
+            scored.append((key, str(r.total), seg))
+        else:
+            try:
+                sim = await evaluation_service.evaluate_similarity(seg, ref)
+            except ValueError as e:
+                lines.append(f"• {label}: ошибка оценки: {e}")
+                first_answer = False
+                continue
+            lines.append(f"• {label}: {sim:.4f}")
+            sim_scores.append(sim)
+            scored.append((key, f"{sim:.4f}", seg))
+
+        first_answer = False
+
+    if use_rubric and rubric_totals:
+        mean_r = sum(rubric_totals) / len(rubric_totals)
+        lines.append("")
+        lines.append("Среднее по рубрике (итого):")
+        lines.append(_mean_formula_rubric(rubric_totals, mean_r))
+    elif not use_rubric and len(sim_scores) >= 1:
+        mean = sum(sim_scores) / len(sim_scores)
+        lines.append("")
+        lines.append(_mean_formula_similarity(sim_scores, mean))
 
     if notes:
         lines.append("")
         lines.append("Примечание:")
         lines.extend(notes)
-
-    preview = transcript.strip()
-    if len(preview) > 1200:
-        preview = preview[:1200] + "…"
-    lines.append("")
-    lines.append(f"{preview_heading}\n{preview}")
 
     await telegram_client.send_message(chat_id, "\n".join(lines))
 
@@ -122,15 +258,30 @@ async def _handle_voice_answering(
             telegram_user_id=user_id,
             session_id=sess.session_id,
             discipline_id=sess.discipline_id,
-            preview_heading="Распознано:",
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("Ошибка конвейера голоса")
         await telegram_client.send_message(chat_id, f"Ошибка обработки голоса: {e}")
 
 
+def _message_from_update(update: dict[str, Any]) -> dict[str, Any] | None:
+    """Обычный чат, канал или Telegram Business (business_message)."""
+    for key in (
+        "message",
+        "edited_message",
+        "channel_post",
+        "edited_channel_post",
+        "business_message",
+        "edited_business_message",
+    ):
+        m = update.get(key)
+        if isinstance(m, dict):
+            return m
+    return None
+
+
 async def handle_telegram_update(update: dict[str, Any]) -> None:
-    message = update.get("message") or update.get("edited_message")
+    message = _message_from_update(update)
     if not isinstance(message, dict):
         return
 
@@ -144,14 +295,15 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
     if not isinstance(user_id, int) or not isinstance(chat_id, int):
         return
 
-    text = message.get("text")
+    text = message.get("text") or message.get("caption")
     if text is not None and not isinstance(text, str):
         text = str(text)
-    text = text or ""
+    text = _normalize_user_text(text or "")
     has_voice = bool(message.get("voice"))
     start_cmd = _is_start_command(text)
 
     if start_cmd:
+        logger.info("Команда /start: user_id=%s chat_id=%s", user_id, chat_id)
         sess = await session_service.reset_session(user_id)
         sess.start_time = time.monotonic()
         out = fsm_service.process_message(
@@ -201,7 +353,6 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
             telegram_user_id=user_id,
             session_id=out.session.session_id,
             discipline_id=out.session.discipline_id,
-            preview_heading="Текст ответа:",
         )
 
     await session_service.upsert_session(out.session)
