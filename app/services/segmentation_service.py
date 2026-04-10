@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,181 @@ def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
     return None
 
 
+# «вопрос 1», «вопрос номер 2», «вопрос № 2» (часто в STT)
+_RU_QNUM = re.compile(r"(?i)\bвопрос\s*(?:номер\s*|№\s*)?(\d+)\b")
+
+# «1-й вопрос», «2-й вопрос» (Whisper и др.)
+_RU_Q_NUM_ORD = re.compile(r"(?is)(?<![\w\d])(10|[1-9])\s*[-‑]?\s*й\s+вопрос\b")
+
+# «первый вопрос», «второй вопрос», … (устная речь, без привязки к номерам из таблицы)
+_RU_Q_ORDINAL: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"(?is)(?<![\w\d])перв(?:ый|ая|ое|ого|ой|ом)\s+вопрос\b"), 1),
+    (re.compile(r"(?is)(?<![\w\d])втор(?:ой|ая|ое|ого|ом)\s+вопрос\b"), 2),
+    (re.compile(r"(?is)(?<![\w\d])трет(?:ий|ья|ье|ьего|ьей|ьем)\s+вопрос\b"), 3),
+    (re.compile(r"(?is)(?<![\w\d])четв[её]рт(?:ый|ая|ое|ого|ом)\s+вопрос\b"), 4),
+    (re.compile(r"(?is)(?<![\w\d])пят(?:ый|ая|ое|ого|ом)\s+вопрос\b"), 5),
+    (re.compile(r"(?is)(?<![\w\d])шест(?:ой|ая|ое|ого|ом)\s+вопрос\b"), 6),
+    (re.compile(r"(?is)(?<![\w\d])седьм(?:ой|ая|ое|ого|ом)\s+вопрос\b"), 7),
+    (re.compile(r"(?is)(?<![\w\d])восьм(?:ой|ая|ое|ого|ом)\s+вопрос\b"), 8),
+    (re.compile(r"(?is)(?<![\w\d])девят(?:ый|ая|ое|ого|ом)\s+вопрос\b"), 9),
+    (re.compile(r"(?is)(?<![\w\d])десят(?:ый|ая|ое|ого|ом)\s+вопрос\b"), 10),
+]
+
+# «первый ключ», «второй ключ», … — то же по смыслу, слово «ключ» без значения из эталона
+_RU_K_ORDINAL: list[tuple[re.Pattern[str], int]] = [
+    (re.compile(r"(?is)(?<![\w\d])перв(?:ый|ого)\s+ключ\b"), 1),
+    (re.compile(r"(?is)(?<![\w\d])втор(?:ой|ого)\s+ключ\b"), 2),
+    (re.compile(r"(?is)(?<![\w\d])трет(?:ий|ьего)\s+ключ\b"), 3),
+    (re.compile(r"(?is)(?<![\w\d])четв[её]рт(?:ый|ого)\s+ключ\b"), 4),
+    (re.compile(r"(?is)(?<![\w\d])пят(?:ый|ого)\s+ключ\b"), 5),
+    (re.compile(r"(?is)(?<![\w\d])шест(?:ой|ого)\s+ключ\b"), 6),
+    (re.compile(r"(?is)(?<![\w\d])седьм(?:ой|ого)\s+ключ\b"), 7),
+    (re.compile(r"(?is)(?<![\w\d])восьм(?:ой|ого)\s+ключ\b"), 8),
+    (re.compile(r"(?is)(?<![\w\d])девят(?:ый|ого)\s+ключ\b"), 9),
+    (re.compile(r"(?is)(?<![\w\d])десят(?:ый|ого)\s+ключ\b"), 10),
+]
+
+# Переход к следующему ответу без номера из бланка
+_RX_TRANSITION = re.compile(
+    r"(?is)(?<![\w\d])(?:"
+    r"следующий\s+вопрос|следующий\s+ключ|"
+    r"ещё\s+вопрос|еще\s+вопрос|"
+    r"другой\s+вопрос"
+    r")\b",
+)
+
+
+def _trim_leading_question_key_phrase(segment: str) -> str:
+    """Убирает в начале фрагмента устные вводные (порядковые «вопрос»/«ключ», переходы) — без привязки к кодам из таблицы."""
+    s = segment.strip()
+    s = re.sub(
+        r"(?is)^\s*(?:перв(?:ый|ая|ое|ого|ой|ом)|втор(?:ой|ая|ое|ого|ом)|трет(?:ий|ья|ье|ьего|ьей|ьем)|"
+        r"четв[её]рт(?:ый|ая|ое|ого|ом)|пят(?:ый|ая|ое|ого|ом)|шест(?:ой|ая|ое|ого|ом)|"
+        r"седьм(?:ой|ая|ое|ого|ом)|восьм(?:ой|ая|ое|ого|ом)|девят(?:ый|ая|ое|ого|ом)|"
+        r"десят(?:ый|ая|ое|ого|ом))\s+вопрос\s*[.,;]?\s*",
+        "",
+        s,
+        count=1,
+    )
+    s = re.sub(
+        r"(?is)^\s*(?:перв(?:ый|ого)|втор(?:ой|ого)|трет(?:ий|ьего)|четв[её]рт(?:ый|ого)|"
+        r"пят(?:ый|ого)|шест(?:ой|ого)|седьм(?:ой|ого)|восьм(?:ой|ого)|девят(?:ый|ого)|десят(?:ый|ого))\s+ключ\s*[.,;]?\s*",
+        "",
+        s,
+        count=1,
+    )
+    # строка-ярлык «ключ …» до конца предложения (любой текст, не значения из конфига)
+    s = re.sub(r"(?is)^\s*ключ\s*[^\n.]*[.\n]\s*", "", s, count=1)
+    s = re.sub(
+        r"(?is)^\s*вопрос\s*(?:номер\s*|№\s*)?\d+\s*[,;]?\s*(?:ключ\s*\d+\s*[,;]?\s*)?",
+        "",
+        s,
+        count=1,
+    )
+    s = re.sub(r"(?is)^\s*(?:10|[1-9])\s*[-‑]?\s*й\s+вопрос\s*[.,;]?\s*", "", s, count=1)
+    s = re.sub(
+        r"(?is)^\s*(?:следующий\s+вопрос|следующий\s+ключ|ещё\s+вопрос|еще\s+вопрос|другой\s+вопрос)\s*[.,;]?\s*",
+        "",
+        s,
+        count=1,
+    )
+    return s.strip()
+
+
+def _try_transition_markers(transcript: str, keys: list[str]) -> dict[str, str] | None:
+    """«Следующий вопрос», «ещё вопрос», «другой вопрос» — границы без номеров из бланка."""
+    if len(keys) < 2:
+        return None
+    text = transcript.strip()
+    positions = sorted(m.start() for m in _RX_TRANSITION.finditer(text))
+    need = len(keys) - 1
+    if len(positions) < need:
+        return None
+    cuts = positions[:need]
+    boundaries = [0] + cuts + [len(text)]
+    out: dict[str, str] = {k: "" for k in keys}
+    for i, k in enumerate(keys):
+        chunk = text[boundaries[i] : boundaries[i + 1]].strip()
+        if i > 0:
+            chunk = _trim_leading_question_key_phrase(chunk)
+        out[k] = chunk
+    if sum(1 for v in out.values() if v.strip()) >= 2:
+        return out
+    return None
+
+
+def _try_russian_question_markers(transcript: str, keys: list[str]) -> dict[str, str] | None:
+    """
+    Устная речь: «вопрос номер N», «первый/второй вопрос», «первый/второй ключ», «N-й вопрос».
+    Номера N относятся только к порядку ответов (1…K), не к кодам вопросов в таблице.
+    """
+    if len(keys) < 2:
+        return None
+    text = transcript.strip()
+    raw: list[tuple[int, int]] = []
+    for m in _RU_QNUM.finditer(text):
+        n = int(m.group(1))
+        if 1 <= n <= len(keys):
+            raw.append((m.start(), n))
+    for m in _RU_Q_NUM_ORD.finditer(text):
+        n = int(m.group(1))
+        if 1 <= n <= len(keys):
+            raw.append((m.start(), n))
+    for rx, n in _RU_Q_ORDINAL:
+        if n > len(keys):
+            continue
+        for m in rx.finditer(text):
+            raw.append((m.start(), n))
+    for rx, n in _RU_K_ORDINAL:
+        if n > len(keys):
+            continue
+        for m in rx.finditer(text):
+            raw.append((m.start(), n))
+    if not raw:
+        return None
+    raw.sort(key=lambda x: x[0])
+    seen: set[int] = set()
+    marks: list[tuple[int, int]] = []
+    for pos, n in raw:
+        if n not in seen:
+            seen.add(n)
+            marks.append((pos, n))
+
+    if len(marks) == 1:
+        pos, num = marks[0]
+        if num < 2:
+            return None
+        out: dict[str, str] = {k: "" for k in keys}
+        head = text[:pos].strip()
+        tail = _trim_leading_question_key_phrase(text[pos:])
+        out[keys[0]] = head
+        if num - 1 < len(keys):
+            out[keys[num - 1]] = tail
+        if sum(1 for v in out.values() if v.strip()) >= 2:
+            return out
+        return None
+
+    out = {k: "" for k in keys}
+    first_pos, first_num = marks[0]
+    if first_num >= 2:
+        out[keys[0]] = text[:first_pos].strip()
+
+    for i, (pos, num) in enumerate(marks):
+        if not (1 <= num <= len(keys)):
+            continue
+        end = marks[i + 1][0] if i + 1 < len(marks) else len(text)
+        # «Вопрос 1» в середине фразы: весь текст от начала до следующей границы — первый ответ (включая билет).
+        start = 0 if (first_num == 1 and i == 0 and num == 1) else pos
+        chunk = text[start:end].strip()
+        if num > 1:
+            chunk = _trim_leading_question_key_phrase(chunk)
+        out[keys[num - 1]] = chunk
+
+    if sum(1 for v in out.values() if v.strip()) >= 2:
+        return out
+    return None
+
+
 def segment_transcript_to_keys(
     transcript: str,
     keys: list[str],
@@ -38,7 +214,7 @@ def segment_transcript_to_keys(
     Вернуть словарь «ключ → фрагмент ответа» и опциональное предупреждение.
     Если разбить не удалось, весь текст кладётся в первый ключ, остальные пустые.
     """
-    t = transcript.strip()
+    t = unicodedata.normalize("NFC", (transcript or "").strip())
     if not keys:
         return {}, "Нет ключей в настройках (MVP_REFERENCES_JSON / MVP_QUESTION_KEY)."
 
@@ -48,6 +224,14 @@ def segment_transcript_to_keys(
     hdr = _try_key_headers(t, keys)
     if hdr:
         return hdr, None
+
+    ru = _try_russian_question_markers(t, keys)
+    if ru:
+        return ru, None
+
+    tr = _try_transition_markers(t, keys)
+    if tr:
+        return tr, None
 
     for sep in ("\n---\n", "\r\n---\r\n", "\n###\n", "\n***\n"):
         parts = t.split(sep)
@@ -68,8 +252,9 @@ def segment_transcript_to_keys(
     warn = (
         "Не удалось автоматически разбить ответ на части по числу ключей. "
         "Весь текст отнесён к первому ключу; остальные — пустые. "
-        "Используйте разделители «---» между блоками, пустые строки между абзацами "
-        "или подписи «Q1: …», «Q2: …»."
+        "Используйте разделители «---» между блоками, пустые строки между абзацами, "
+        "подписи «Q1: …», «Q2: …» или устные формулировки вроде "
+        "«первый/второй вопрос», «первый/второй ключ», «вопрос номер два», «следующий вопрос»."
     )
     return out, warn
 
@@ -120,7 +305,9 @@ async def segment_with_fallback(
     *,
     use_llm: bool,
 ) -> tuple[dict[str, str], list[str]]:
-    """Сначала эвристики; при предупреждении и флаге — попытка LLM."""
+    """Эвристики и явные разделители; при неудаче и включённом флаге — разбиение через LLM по списку ключей (без привязки к тексту бланка)."""
+    from app.core.config import settings
+
     notes: list[str] = []
     parts, warn = segment_transcript_to_keys(transcript, keys)
     if warn:
@@ -128,6 +315,7 @@ async def segment_with_fallback(
 
     if (
         use_llm
+        and (settings.openai_api_key or "").strip()
         and len(keys) > 1
         and len(transcript.strip()) > 30
         and notes
