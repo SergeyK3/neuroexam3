@@ -84,6 +84,8 @@ def fetch_ideal_references_sync(
     credentials_path: str,
 ) -> dict[str, str]:
     """Синхронное чтение (вызывать через asyncio.to_thread)."""
+    from app.integrations import google_sheets
+
     cred_path = _resolve_credentials_path(credentials_path)
     if not cred_path:
         raise RuntimeError(
@@ -93,19 +95,11 @@ def fetch_ideal_references_sync(
     if not os.path.isfile(cred_path):
         raise FileNotFoundError(f"Файл ключа не найден: {cred_path}")
 
-    try:
-        import gspread
-    except ImportError as e:
-        raise RuntimeError("Установите пакеты: gspread google-auth") from e
-
-    gc = gspread.service_account(filename=cred_path)
-    sh = gc.open_by_key(spreadsheet_id)
-    try:
-        ws = sh.worksheet(worksheet_title)
-    except Exception as e:
-        raise RuntimeError(
-            f"Лист «{worksheet_title}» не найден. Доступные: {[w.title for w in sh.worksheets()]}",
-        ) from e
+    ws = google_sheets.get_worksheet(
+        spreadsheet_id,
+        worksheet_title,
+        credentials_path=credentials_path,
+    )
     rows = ws.get_all_values()
     return _parse_table(rows)
 
@@ -124,14 +118,18 @@ async def fetch_ideal_references(
     )
 
 
+# Лист результатов: шапка как в операционной таблице кафедры (A–J). Одна строка = один оценённый ключ вопроса.
 _RESULT_HEADER = (
-    "timestamp_utc",
-    "telegram_user_id",
-    "session_id",
-    "discipline_slug",
-    "question_key",
-    "score",
-    "answer_excerpt",
+    "ID сообщения",
+    "ID в Telegram",
+    "Название дисциплины",
+    "Название контроля",
+    "Дата и время начала ответа",
+    "ФИО студента",
+    "Оценка",
+    "Номер билета",
+    "Ответ на билет",
+    "Комментарий",
 )
 
 
@@ -143,6 +141,8 @@ def append_student_result_row_sync(
     row: list[Any],
 ) -> None:
     """Добавить строку на лист результатов; при пустом листе — записать заголовок."""
+    from app.integrations import google_sheets
+
     cred_path = _resolve_credentials_path(credentials_path)
     if not cred_path:
         raise RuntimeError(
@@ -152,19 +152,11 @@ def append_student_result_row_sync(
     if not os.path.isfile(cred_path):
         raise FileNotFoundError(f"Файл ключа не найден: {cred_path}")
 
-    try:
-        import gspread
-    except ImportError as e:
-        raise RuntimeError("Установите пакеты: gspread google-auth") from e
-
-    gc = gspread.service_account(filename=cred_path)
-    sh = gc.open_by_key(spreadsheet_id)
-    try:
-        ws = sh.worksheet(worksheet_title)
-    except Exception as e:
-        raise RuntimeError(
-            f"Лист «{worksheet_title}» не найден. Доступные: {[w.title for w in sh.worksheets()]}",
-        ) from e
+    ws = google_sheets.get_worksheet(
+        spreadsheet_id,
+        worksheet_title,
+        credentials_path=credentials_path,
+    )
 
     existing = ws.get_all_values()
     if not existing:
@@ -193,21 +185,62 @@ async def append_student_result_row(
     )
 
 
+def _clip(text: str, max_len: int) -> str:
+    t = (text or "").strip()
+    if len(t) <= max_len:
+        return t
+    return t[:max_len] + "…"
+
+
 def build_result_row(
     *,
     telegram_user_id: int,
     session_id: str,
     discipline_slug: str,
+    course_name: str,
+    control_type: str,
+    student_fio: str,
     question_key: str,
     score_display: str,
+    full_transcript: str,
     answer_excerpt: str,
+    rationale: str,
+    telegram_message_id: int | None = None,
+    ticket_number: str = "",
 ) -> list[Any]:
-    """Одна строка для student_answers (без эталонов). score_display — балл 0–100 или сходство 0–1 как строка."""
-    ts = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-    excerpt = (answer_excerpt or "").strip()
-    if len(excerpt) > 2000:
-        excerpt = excerpt[:2000] + "…"
-    return [ts, str(telegram_user_id), session_id, discipline_slug, question_key, score_display, excerpt]
+    """
+    Одна строка листа students_answers. Оценка — балл 0–100 или сходство 0–1 как строка.
+    Колонка «Ответ на билет» — фрагмент по данному ключу; при пустом фрагменте — обрезанный полный транскрипт.
+    """
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
+    answer_cell = (answer_excerpt or "").strip() or (full_transcript or "").strip()
+    answer_cell = _clip(answer_cell, 8000)
+    comment = _clip(
+        "\n".join(
+            p
+            for p in (
+                (rationale or "").strip(),
+                f"Ключ вопроса: {question_key}" if question_key else "",
+                f"Код дисциплины (бот): {discipline_slug}" if discipline_slug else "",
+                f"session: {session_id}" if session_id else "",
+            )
+            if p
+        ),
+        4000,
+    )
+    msg_id = str(telegram_message_id) if telegram_message_id is not None else ""
+    return [
+        msg_id,
+        str(telegram_user_id),
+        _clip(course_name, 500),
+        _clip(control_type, 300),
+        ts,
+        _clip(student_fio, 300),
+        score_display,
+        _clip(ticket_number, 200),
+        answer_cell,
+        comment,
+    ]
 
 
 def append_with_retries(

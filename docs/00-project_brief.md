@@ -103,7 +103,7 @@
 Структура таблицы:
 
 - reference_answers — эталоны
-- student_answers — ответы студентов
+- `students_answers` (или имя из `GOOGLE_SHEET_RESULTS_TAB`) — ответы студентов
 - metadata — версия и конфигурация
 
 Google Sheets используются как:

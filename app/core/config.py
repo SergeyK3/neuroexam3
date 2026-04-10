@@ -37,9 +37,9 @@ class Settings(BaseSettings):
     # Какой slug использовать, пока в боте нет выбора дисциплины
     default_discipline: str = "default"
     # Имя вкладки с эталонами (как в UI таблицы)
-    google_sheet_ideal_tab: str = "ideal answers"
+    google_sheet_ideal_tab: str = "ideal_answers"
     # Лист для append результатов (без эталонов)
-    google_sheet_results_tab: str = "student_answers"
+    google_sheet_results_tab: str = "students_answers"
 
     # Очередь: при непустом REDIS_URL вебхук Telegram ставит задачу в Redis (нужен процесс arq)
     redis_url: str = ""

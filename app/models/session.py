@@ -29,4 +29,6 @@ class ExamSession:
     # По порядку: дисциплина → вид контроля → ФИО (накапливается из одного или нескольких сообщений)
     registration_parts: list[str] = field(default_factory=list)
     registration_raw: str | None = None
+    # Номер экзаменационного билета (из текста/транскрипта, см. exam_text_parsing.extract_ticket_number)
+    ticket_number: str | None = None
     last_transcript: str | None = None

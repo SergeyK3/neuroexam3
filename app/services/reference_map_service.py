@@ -53,12 +53,12 @@ def _sheet_id_for_session(discipline_id: str | None) -> str | None:
 
 async def get_reference_map(discipline_id: str | None) -> dict[str, str]:
     """
-    Загрузить эталоны. Если заданы credentials и id таблицы — читаем лист ``ideal answers``
-    (имя задаётся в GOOGLE_SHEET_IDEAL_TAB). Иначе — MVP_REFERENCES_JSON / пара Q1+REFERENCE.
+    Загрузить эталоны. Если заданы credentials и id таблицы — читаем лист эталонов
+    (имя задаётся в GOOGLE_SHEET_IDEAL_TAB, по умолчанию ``ideal_answers``). Иначе — MVP_REFERENCES_JSON / пара Q1+REFERENCE.
     """
     creds = settings.google_creds_path()
     sheet_id = _sheet_id_for_session(discipline_id)
-    tab = (settings.google_sheet_ideal_tab or "ideal answers").strip() or "ideal answers"
+    tab = (settings.google_sheet_ideal_tab or "ideal_answers").strip() or "ideal_answers"
 
     if creds and sheet_id:
         cache_key = f"{sheet_id}|{tab}"

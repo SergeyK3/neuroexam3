@@ -22,7 +22,7 @@ async def test_get_reference_map_calls_sheet_when_configured(monkeypatch):
     monkeypatch.setattr(cfg.settings, "google_sheets_credentials", "/fake/path.json", raising=False)
     monkeypatch.setattr(cfg.settings, "google_sheet_id", "abc123", raising=False)
     monkeypatch.setattr(cfg.settings, "discipline_google_sheet_ids_json", "", raising=False)
-    monkeypatch.setattr(cfg.settings, "google_sheet_ideal_tab", "ideal answers", raising=False)
+    monkeypatch.setattr(cfg.settings, "google_sheet_ideal_tab", "ideal_answers", raising=False)
 
     async def fake_fetch(sheet_id: str, tab: str, *, credentials_path: str):
         assert sheet_id == "abc123"

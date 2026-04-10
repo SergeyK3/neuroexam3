@@ -19,6 +19,7 @@ from app.services import (
     speech_service,
 )
 from app.services.evaluation_service import RubricScores
+from app.services.exam_text_parsing import extract_ticket_number
 
 logger = logging.getLogger(__name__)
 
@@ -29,19 +30,24 @@ def _normalize_user_text(text: str) -> str:
     """NFC + убрать невидимые символы (ZWSP и т.д.), мешающие распознать /start."""
     t = unicodedata.normalize("NFC", text).strip()
     return re.sub(r"[\u200b\u200c\u200d\ufeff]", "", t)
-_Q_LABEL = re.compile(r"^Q(\d+)$", re.IGNORECASE)
+def _rubric_rationale_for_sheet(r: RubricScores) -> str:
+    """Текст для колонки rationale в Google Sheets (рубрика)."""
+    parts: list[str] = []
+    if (r.content_rationale or "").strip():
+        parts.append(f"Полнота: {_truncate_block(r.content_rationale, 900)}")
+    if (r.accuracy_rationale or "").strip():
+        parts.append(f"Точность: {_truncate_block(r.accuracy_rationale, 900)}")
+    if (r.structure_rationale or "").strip():
+        parts.append(f"Структура: {_truncate_block(r.structure_rationale, 900)}")
+    if (r.conciseness_rationale or "").strip():
+        parts.append(f"Без лишнего: {_truncate_block(r.conciseness_rationale, 900)}")
+    return "\n\n".join(parts)
 
 
-def _display_key_label(key: str) -> str:
-    m = _Q_LABEL.match(key.strip())
-    if m:
-        return f"Вопрос {m.group(1)}"
-    return key
-
-
-def _rubric_lines(label: str, r: RubricScores) -> list[str]:
+def _rubric_lines(question_ordinal: int, r: RubricScores) -> list[str]:
+    """Текст для Telegram: без кодов ключей из таблицы — только порядковый «Вопрос N»."""
     lines = [
-        f"• {label}:",
+        f"• Вопрос {question_ordinal}",
         f"  — полнота: {r.content_score}/60",
         f"  — точность: {r.accuracy_score}/20",
         f"  — структура: {r.structure_score}/10",
@@ -125,12 +131,18 @@ async def _evaluate_and_reply(
     telegram_user_id: int,
     session_id: str,
     discipline_id: str | None = None,
+    registration_raw: str | None = None,
+    telegram_message_id: int | None = None,
+    ticket_number: str | None = None,
 ) -> None:
     """Сегментация по ключам (Google Sheets или .env), оценка каждого непустого фрагмента."""
     try:
         ref_map = await reference_map_service.get_reference_map(discipline_id)
     except ValueError as e:
-        await telegram_client.send_message(chat_id, f"Ошибка настроек таблиц/эталонов: {e}")
+        await telegram_client.send_message(
+            chat_id,
+            f"Ошибка настроек таблиц/эталонов: {telegram_client.redact_secrets(str(e))}",
+        )
         return
 
     if not ref_map:
@@ -165,19 +177,20 @@ async def _evaluate_and_reply(
 
     use_rubric = evaluation_service.use_rubric_scoring()
 
-    scored: list[tuple[str, str, str]] = []
+    scored: list[tuple[str, str, str, str]] = []
     rubric_totals: list[int] = []
     sim_scores: list[float] = []
 
     lines: list[str] = []
 
     first_answer = True
+    question_ordinal = 0
     for key in keys:
         seg = (parts.get(key) or "").strip()
         ref = ref_map[key]
         if not seg:
             continue
-        label = _display_key_label(key)
+        question_ordinal += 1
         if not first_answer:
             lines.append("")
         lines.append(_truncate_block(seg))
@@ -187,22 +200,23 @@ async def _evaluate_and_reply(
             try:
                 r = await evaluation_service.evaluate_rubric(seg, ref)
             except (ValueError, RuntimeError) as e:
-                lines.append(f"• {label}: ошибка оценки: {e}")
+                lines.append(f"• Вопрос {question_ordinal}: ошибка оценки: {e}")
                 first_answer = False
                 continue
-            lines.extend(_rubric_lines(label, r))
+            lines.extend(_rubric_lines(question_ordinal, r))
             rubric_totals.append(r.total)
-            scored.append((key, str(r.total), seg))
+            scored.append((key, str(r.total), seg, _rubric_rationale_for_sheet(r)))
         else:
             try:
                 sim = await evaluation_service.evaluate_similarity(seg, ref)
             except ValueError as e:
-                lines.append(f"• {label}: ошибка оценки: {e}")
+                lines.append(f"• Вопрос {question_ordinal}: ошибка оценки: {e}")
                 first_answer = False
                 continue
-            lines.append(f"• {label}: {sim:.4f}")
+            lines.append(f"• Вопрос {question_ordinal}")
+            lines.append(f"  — сходство: {sim:.4f}")
             sim_scores.append(sim)
-            scored.append((key, f"{sim:.4f}", seg))
+            scored.append((key, f"{sim:.4f}", seg, ""))
 
         first_answer = False
 
@@ -228,7 +242,11 @@ async def _evaluate_and_reply(
             discipline_id=discipline_id,
             telegram_user_id=telegram_user_id,
             session_id=session_id,
+            registration_raw=registration_raw,
+            full_transcript=transcript,
             scored_rows=scored,
+            telegram_message_id=telegram_message_id,
+            ticket_number=ticket_number,
         )
 
 
@@ -252,16 +270,27 @@ async def _handle_voice_answering(
         lang = sess.language or "ru"
         transcript = await speech_service.transcribe(audio, language=lang)
         sess.last_transcript = transcript
+        tn = extract_ticket_number(transcript)
+        if tn:
+            sess.ticket_number = tn
+        mid_raw = message.get("message_id")
+        msg_id = mid_raw if isinstance(mid_raw, int) else None
         await _evaluate_and_reply(
             chat_id,
             transcript,
             telegram_user_id=user_id,
             session_id=sess.session_id,
             discipline_id=sess.discipline_id,
+            registration_raw=sess.registration_raw,
+            telegram_message_id=msg_id,
+            ticket_number=sess.ticket_number,
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("Ошибка конвейера голоса")
-        await telegram_client.send_message(chat_id, f"Ошибка обработки голоса: {e}")
+        await telegram_client.send_message(
+            chat_id,
+            f"Ошибка обработки голоса: {telegram_client.redact_secrets(str(e))}",
+        )
 
 
 def _message_from_update(update: dict[str, Any]) -> dict[str, Any] | None:
@@ -346,13 +375,21 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
         await telegram_client.send_message(chat_id, line)
 
     if out.evaluate_text:
-        sess.last_transcript = out.evaluate_text.strip()
+        out.session.last_transcript = out.evaluate_text.strip()
+        tn = extract_ticket_number(out.evaluate_text)
+        if tn:
+            out.session.ticket_number = tn
+        mid_raw = message.get("message_id")
+        msg_id = mid_raw if isinstance(mid_raw, int) else None
         await _evaluate_and_reply(
             chat_id,
             out.evaluate_text,
             telegram_user_id=user_id,
             session_id=out.session.session_id,
             discipline_id=out.session.discipline_id,
+            registration_raw=out.session.registration_raw,
+            telegram_message_id=msg_id,
+            ticket_number=out.session.ticket_number,
         )
 
     await session_service.upsert_session(out.session)

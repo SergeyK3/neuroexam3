@@ -212,7 +212,7 @@ async def evaluate_rubric(student_answer: str, reference_answer: str) -> RubricS
             {"role": "user", "content": user_msg},
         ],
         response_format={"type": "json_object"},
-        temperature=0.2,
+        temperature=0,
     )
     raw = (resp.choices[0].message.content or "").strip()
     data = json.loads(raw)

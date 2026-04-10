@@ -7,16 +7,18 @@ from app.services import segmentation_service
 
 def test_one_key_returns_whole_transcript():
     t = "Полный ответ студента."
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, ["Q1"])
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, ["Q1"])
+    assert err is None
+    assert try_llm is False
     assert parts == {"Q1": t}
 
 
 def test_three_paragraphs_three_keys():
     t = "Ответ один.\n\nВторой блок.\n\nТретий блок."
     keys = ["Q1", "Q2", "Q3"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert parts["Q1"] == "Ответ один."
     assert "Второй" in parts["Q2"]
 
@@ -24,17 +26,19 @@ def test_three_paragraphs_three_keys():
 def test_separator_triple_dash():
     t = "A\n---\nB\n---\nC"
     keys = ["Q1", "Q2", "Q3"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert parts["Q1"].strip() == "A"
     assert parts["Q3"].strip() == "C"
 
 
-def test_fallback_fills_warning():
+def test_fallback_puts_all_in_first_key_and_flags_llm():
     t = "Один сплошной текст без разбиения на три части."
     keys = ["Q1", "Q2", "Q3"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is not None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is True
     assert parts["Q1"] == t
     assert parts["Q2"] == ""
 
@@ -45,8 +49,9 @@ def test_russian_question_markers_two_blocks():
         "Вопрос номер 2, ключ 157, какие проблемы помогает решать библиотека. Второй ответ. Ответ закончен."
     )
     keys = ["Q1", "Q2", "Q3"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert "Первый ответ" in parts["Q1"]
     assert "Второй ответ" in parts["Q2"]
     assert parts["Q3"] == ""
@@ -55,8 +60,9 @@ def test_russian_question_markers_two_blocks():
 def test_russian_only_question_two_marker():
     t = "Сначала ответ на первый вопрос без явного «вопрос 1». Вопрос номер 2, ключ 99, продолжение."
     keys = ["Q1", "Q2"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert "Сначала" in parts["Q1"]
     assert "продолжение" in parts["Q2"]
 
@@ -64,8 +70,9 @@ def test_russian_only_question_two_marker():
 def test_russian_question_number_sign_marker():
     t = "Первый блок текста. Вопрос № 2, ключ 42, второй блок."
     keys = ["Q1", "Q2"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert "Первый" in parts["Q1"]
     assert "второй" in parts["Q2"]
 
@@ -77,8 +84,9 @@ def test_russian_ordinal_key_markers():
         "Второй ключ. Ответ про Б и В."
     )
     keys = ["Q1", "Q2"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert "про А" in parts["Q1"]
     assert "про Б" in parts["Q2"]
 
@@ -86,8 +94,9 @@ def test_russian_ordinal_key_markers():
 def test_transition_speech_markers():
     t = "Начало ответа по первому. Следующий вопрос. Продолжение по второму."
     keys = ["Q1", "Q2"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert "первому" in parts["Q1"]
     assert "второму" in parts["Q2"]
 
@@ -102,8 +111,9 @@ def test_russian_ordinal_first_second_question_exam_style():
         "Ответ про регистры и сбор данных."
     )
     keys = ["146", "1, 2, 8"]
-    parts, warn = segmentation_service.segment_transcript_to_keys(t, keys)
-    assert warn is None
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
     assert "реального времени" in parts["146"] or "мониторинг" in parts["146"]
     assert "регистр" in parts["1, 2, 8"].lower() or "сбор" in parts["1, 2, 8"].lower()
 

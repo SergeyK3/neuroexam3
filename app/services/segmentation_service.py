@@ -209,54 +209,50 @@ def _try_russian_question_markers(transcript: str, keys: list[str]) -> dict[str,
 def segment_transcript_to_keys(
     transcript: str,
     keys: list[str],
-) -> tuple[dict[str, str], str | None]:
+) -> tuple[dict[str, str], str | None, bool]:
     """
-    Вернуть словарь «ключ → фрагмент ответа» и опциональное предупреждение.
-    Если разбить не удалось, весь текст кладётся в первый ключ, остальные пустые.
+    Вернуть словарь «ключ → фрагмент ответа», опциональную ошибку конфигурации,
+    и флаг «эвристики не разбили много ключей — имеет смысл попробовать LLM».
+
+    Если разбить не удалось, весь текст кладётся в первый ключ, остальные пустые
+    (без пользовательского предупреждения в чате — см. segment_with_fallback).
     """
     t = unicodedata.normalize("NFC", (transcript or "").strip())
     if not keys:
-        return {}, "Нет ключей в настройках (MVP_REFERENCES_JSON / MVP_QUESTION_KEY)."
+        return {}, "Нет ключей в настройках (MVP_REFERENCES_JSON / MVP_QUESTION_KEY).", False
 
     if len(keys) == 1:
-        return {keys[0]: t}, None
+        return {keys[0]: t}, None, False
 
     hdr = _try_key_headers(t, keys)
     if hdr:
-        return hdr, None
+        return hdr, None, False
 
     ru = _try_russian_question_markers(t, keys)
     if ru:
-        return ru, None
+        return ru, None, False
 
     tr = _try_transition_markers(t, keys)
     if tr:
-        return tr, None
+        return tr, None, False
 
     for sep in ("\n---\n", "\r\n---\r\n", "\n###\n", "\n***\n"):
         parts = t.split(sep)
         if len(parts) == len(keys):
-            return {k: p.strip() for k, p in zip(keys, parts, strict=True)}, None
+            return {k: p.strip() for k, p in zip(keys, parts, strict=True)}, None, False
 
     paras = [p.strip() for p in re.split(r"\n\s*\n", t) if p.strip()]
     if len(paras) == len(keys):
-        return {k: p for k, p in zip(keys, paras, strict=True)}, None
+        return {k: p for k, p in zip(keys, paras, strict=True)}, None, False
 
     lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
     if len(lines) == len(keys):
-        return {k: p for k, p in zip(keys, lines, strict=True)}, None
+        return {k: p for k, p in zip(keys, lines, strict=True)}, None, False
 
     out = {keys[0]: t}
     for k in keys[1:]:
         out[k] = ""
-    warn = (
-        "Не удалось автоматически разбить ответ на части по числу ключей. "
-        "Весь текст отнесён к первому ключу; остальные — пустые. "
-        "Используйте разделители «---» между блоками, пустые строки между абзацами, "
-        "подписи «Q1: …», «Q2: …» или устные формулировки вроде "
-        "«первый/второй вопрос», «первый/второй ключ», «вопрос номер два», «следующий вопрос»."
-    )
-    return out, warn
+    return out, None, True
 
 
 async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, str] | None:
@@ -286,7 +282,7 @@ async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, 
         model="gpt-4o-mini",
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"},
-        temperature=0.2,
+        temperature=0,
     )
     raw = (resp.choices[0].message.content or "").strip()
     data = json.loads(raw)
@@ -309,21 +305,21 @@ async def segment_with_fallback(
     from app.core.config import settings
 
     notes: list[str] = []
-    parts, warn = segment_transcript_to_keys(transcript, keys)
-    if warn:
-        notes.append(warn)
+    parts, config_err, try_llm_refinement = segment_transcript_to_keys(transcript, keys)
+    if config_err:
+        notes.append(config_err)
 
     if (
         use_llm
         and (settings.openai_api_key or "").strip()
         and len(keys) > 1
         and len(transcript.strip()) > 30
-        and notes
+        and try_llm_refinement
     ):
         try:
             llm_parts = await segment_transcript_llm(transcript, keys)
             if llm_parts and sum(1 for v in llm_parts.values() if v.strip()) >= 2:
-                return llm_parts, notes + ["Сегментация уточнена моделью (LLM)."]
+                return llm_parts, []
         except Exception:
             logger.exception("segment_transcript_llm failed")
 

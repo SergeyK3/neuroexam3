@@ -1,4 +1,4 @@
-"""Выгрузка строк оценки в Google Sheets (лист student_answers), без эталонов."""
+"""Выгрузка строк оценки в Google Sheets (лист GOOGLE_SHEET_RESULTS_TAB), без эталонов."""
 
 from __future__ import annotations
 
@@ -7,9 +7,24 @@ import logging
 
 from app.core.config import settings
 from app.integrations import sheets_client
+from app.integrations.google_sheets import results_worksheet_title
 from app.services import reference_map_service
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_registration_lines(raw: str | None) -> tuple[str, str, str]:
+    """Три поля регистрации: дисциплина/курс, вид контроля, ФИО (как в FSM)."""
+    if not raw or not str(raw).strip():
+        return ("", "", "")
+    lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+    if len(lines) >= 3:
+        return (lines[0], lines[1], lines[2])
+    if len(lines) == 2:
+        return (lines[0], lines[1], "")
+    if len(lines) == 1:
+        return (lines[0], "", "")
+    return ("", "", "")
 
 
 async def export_question_scores(
@@ -17,15 +32,19 @@ async def export_question_scores(
     discipline_id: str | None,
     telegram_user_id: int,
     session_id: str,
-    scored_rows: list[tuple[str, str, str]],
+    registration_raw: str | None,
+    full_transcript: str,
+    scored_rows: list[tuple[str, str, str, str]],
+    telegram_message_id: int | None = None,
+    ticket_number: str | None = None,
 ) -> None:
     """
-    Для каждой оценённой пары (ключ, score_display, фрагмент ответа) — append строки.
+    Для каждой оценённой строки (ключ, score_display, фрагмент, обоснование) — append в Sheets.
     При отсутствии credentials / id таблицы — no-op.
     """
     creds = settings.google_creds_path()
     sheet_id = reference_map_service.spreadsheet_id_for_discipline(discipline_id)
-    tab = (settings.google_sheet_results_tab or "student_answers").strip() or "student_answers"
+    tab = results_worksheet_title()
     if not creds or not sheet_id:
         if not creds:
             logger.warning(
@@ -44,15 +63,23 @@ async def export_question_scores(
         return
 
     slug = (discipline_id or settings.default_discipline or "").strip() or "-"
+    course_name, control_type, student_fio = _parse_registration_lines(registration_raw)
 
-    for question_key, score_display, excerpt in scored_rows:
+    for question_key, score_display, excerpt, rationale in scored_rows:
         row = sheets_client.build_result_row(
             telegram_user_id=telegram_user_id,
             session_id=session_id,
             discipline_slug=slug,
+            course_name=course_name,
+            control_type=control_type,
+            student_fio=student_fio,
             question_key=question_key,
             score_display=score_display,
+            full_transcript=full_transcript,
             answer_excerpt=excerpt,
+            rationale=rationale or "",
+            telegram_message_id=telegram_message_id,
+            ticket_number=ticket_number or "",
         )
         try:
             await asyncio.to_thread(

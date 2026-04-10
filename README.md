@@ -86,8 +86,8 @@ uvicorn main:app --reload --port 8000
 | `GOOGLE_SHEET_ID` | ID одной таблицы, если не используете карту дисциплин |
 | `DISCIPLINE_GOOGLE_SHEET_IDS_JSON` | JSON `slug → spreadsheet_id`; при **нескольких** slug в боте показывается выбор дисциплины |
 | `DEFAULT_DISCIPLINE` | Slug по умолчанию, если карта задана, но `discipline_id` не выбран |
-| `GOOGLE_SHEET_IDEAL_TAB` | Лист с эталонами (по умолчанию `ideal answers`) |
-| `GOOGLE_SHEET_RESULTS_TAB` | Лист для append результатов (по умолчанию `student_answers`) |
+| `GOOGLE_SHEET_IDEAL_TAB` | Лист с эталонами (по умолчанию `ideal_answers`) |
+| `GOOGLE_SHEET_RESULTS_TAB` | Лист для append результатов (по умолчанию `students_answers`) |
 | `MVP_QUESTION_KEY`, `MVP_REFERENCE_ANSWER` | Один эталон без JSON |
 | `MVP_REFERENCES_JSON` | Несколько ключей: `{"Q1":"эталон",...}` |
 | `MVP_SEGMENTATION_USE_LLM` | `true` — при неудачной эвристической сегментации пробовать разбиение через OpenAI |

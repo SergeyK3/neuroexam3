@@ -246,9 +246,9 @@ timestamp
 ## 6. Multi-discipline модель
 
 - 1 дисциплина = 1 Google Sheet
-- 3 листа:
-  - reference_answers
-  - student_answers
+- 3 листа (имена в проде задаются в `.env`, типично):
+  - `ideal_answers` — эталоны (`GOOGLE_SHEET_IDEAL_TAB`)
+  - `students_answers` — результаты (`GOOGLE_SHEET_RESULTS_TAB`)
   - metadata
 
 Данные НЕ удаляются

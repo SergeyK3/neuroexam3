@@ -15,7 +15,7 @@ httpx>=0.27.0
 # Whisper (STT) via OpenAI API — нужен OPENAI_API_KEY в .env
 openai>=1.40.0
 
-# Google Sheets (эталоны с листа ideal answers)
+# Google Sheets (эталоны с листа ideal_answers)
 gspread>=6.0.0
 google-auth>=2.29.0
 # SpeechRecognition>=3.10.0  # local / Google STT
