@@ -34,7 +34,13 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
         received = request.headers.get(_TELEGRAM_SECRET_HEADER)
         if not _secret_matches(settings.telegram_webhook_secret, received):
             logger.warning("Telegram webhook: invalid or missing secret token")
-            raise HTTPException(status_code=401, detail="Invalid webhook secret")
+            raise HTTPException(
+                status_code=401,
+                detail=(
+                    "Invalid webhook secret. If TELEGRAM_WEBHOOK_SECRET is set in .env, "
+                    "call setWebhook with the same secret_token=..., or leave .env empty for testing."
+                ),
+            )
 
     try:
         update: dict[str, Any] = await request.json()
