@@ -5,6 +5,21 @@ from dataclasses import dataclass
 from app.core.config import settings
 from app.models.session import ExamSession, ExamState
 
+_REGISTRATION_LABELS = (
+    "название дисциплины или курса",
+    "вид контроля (рубежный контроль или экзамен)",
+    "ФИО полностью",
+)
+
+_REGISTRATION_PROMPT = (
+    "Нужны **три сведения по порядку**:\n"
+    "1) Название дисциплины или курса\n"
+    "2) Вид контроля (рубежный контроль или экзамен)\n"
+    "3) ФИО полностью\n\n"
+    "Можно отправить **одним сообщением** (несколько строк или через `;` / `|`), "
+    "или **несколькими сообщениями подряд** — если случайно нажали Enter, просто допишите в следующих сообщениях."
+)
+
 _LANG_ALIASES = {
     "ru": "ru",
     "rus": "ru",
@@ -22,6 +37,22 @@ _LANG_ALIASES = {
     "английский": "en",
     "3": "en",
 }
+
+
+def _fragments_from_message(text: str) -> list[str]:
+    """Фрагменты из одного сообщения: строки, либо одна строка с разделителями ; | , либо одна фраза."""
+    t = text.strip()
+    if not t:
+        return []
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if len(lines) > 1:
+        return lines
+    single = lines[0] if lines else t
+    for sep in (";", "|"):
+        if sep in single:
+            parts = [p.strip() for p in single.split(sep) if p.strip()]
+            return parts
+    return [single]
 
 
 @dataclass
@@ -82,30 +113,16 @@ def process_message(
             session.discipline_id = slugs[0]
         else:
             session.discipline_id = None
+        session.registration_parts = []
         session.state = ExamState.REGISTRATION
-        return FsmOutcome(
-            session,
-            [
-                "Пожалуйста, предоставьте следующие регистрационные данные одним сообщением:\n"
-                "• Название дисциплины или курса\n"
-                "• Название контроля (рубежный контроль или экзамен)\n"
-                "• ФИО полностью",
-            ],
-        )
+        return FsmOutcome(session, [_REGISTRATION_PROMPT])
 
     if session.state == ExamState.DISCIPLINE:
         slugs = settings.ordered_discipline_slugs()
         if len(slugs) < 2:
+            session.registration_parts = []
             session.state = ExamState.REGISTRATION
-            return FsmOutcome(
-                session,
-                [
-                    "Пожалуйста, предоставьте следующие регистрационные данные одним сообщением:\n"
-                    "• Название дисциплины или курса\n"
-                    "• Название контроля (рубежный контроль или экзамен)\n"
-                    "• ФИО полностью",
-                ],
-            )
+            return FsmOutcome(session, [_REGISTRATION_PROMPT])
         raw = t.strip()
         if not raw:
             return FsmOutcome(
@@ -132,21 +149,35 @@ def process_message(
                 ],
             )
         session.discipline_id = chosen
+        session.registration_parts = []
         session.state = ExamState.REGISTRATION
-        return FsmOutcome(
-            session,
-            [
-                "Пожалуйста, предоставьте следующие регистрационные данные одним сообщением:\n"
-                "• Название дисциплины или курса\n"
-                "• Название контроля (рубежный контроль или экзамен)\n"
-                "• ФИО полностью",
-            ],
-        )
+        return FsmOutcome(session, [_REGISTRATION_PROMPT])
 
     if session.state == ExamState.REGISTRATION:
         if not t:
             return FsmOutcome(session, ["Отправьте регистрационные данные текстом (см. список выше)."])
-        session.registration_raw = t
+        frags = _fragments_from_message(t)
+        if not frags:
+            return FsmOutcome(session, ["Отправьте непустой текст."])
+        buf = list(session.registration_parts)
+        for f in frags:
+            if len(buf) >= 3:
+                break
+            buf.append(f)
+        session.registration_parts = buf
+        if len(session.registration_parts) < 3:
+            n = len(session.registration_parts)
+            nxt = _REGISTRATION_LABELS[n]
+            return FsmOutcome(
+                session,
+                [
+                    f"Принято ({n}/3). Дальше пришлите: **{nxt}** "
+                    f"(отдельным сообщением или вместе с остальным — как удобно). "
+                    f"Осталось полей: {3 - n}.",
+                ],
+            )
+        session.registration_raw = "\n".join(session.registration_parts[:3])
+        session.registration_parts = []
         session.state = ExamState.ANSWERING
         return FsmOutcome(
             session,
@@ -155,10 +186,7 @@ def process_message(
                 "• Номер экзаменационного билета\n"
                 "• Ключ вопроса\n"
                 "• Ответ на вопрос\n"
-                "• Ключ следующего вопроса и ответ (если есть)\n\n"
-                "Затем отправьте ответ **текстом или голосом**. "
-                "Несколько ответов: разделяйте блоки пустой строкой, строкой «---» или подписями «Q1: …», «Q2: …». "
-                "Эталоны задаются на сервере (MVP); эталон в чате не показывается.",
+                "• Ключ следующего вопроса и ответ (если есть)\n",
             ],
         )
 

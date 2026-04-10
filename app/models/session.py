@@ -26,5 +26,7 @@ class ExamSession:
     state: ExamState = ExamState.START
     start_time: float = 0.0
     language: str | None = None  # ru | kk | en
+    # По порядку: дисциплина → вид контроля → ФИО (накапливается из одного или нескольких сообщений)
+    registration_parts: list[str] = field(default_factory=list)
     registration_raw: str | None = None
     last_transcript: str | None = None
