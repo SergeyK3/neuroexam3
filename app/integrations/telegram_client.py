@@ -14,7 +14,11 @@ _TELEGRAM_API = "https://api.telegram.org"
 async def send_message(chat_id: int, text: str) -> None:
     """Отправить текст в чат."""
     if not settings.telegram_bot_token:
-        logger.warning("TELEGRAM_BOT_TOKEN не задан — сообщение не отправлено: %s", text[:200])
+        logger.error(
+            "TELEGRAM_BOT_TOKEN пустой — ответ пользователю не отправлен (chat_id=%s). "
+            "Проверьте .env у процесса uvicorn и arq.",
+            chat_id,
+        )
         return
 
     url = f"{_TELEGRAM_API}/bot{settings.telegram_bot_token}/sendMessage"
