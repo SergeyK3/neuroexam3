@@ -8,9 +8,9 @@ from typing import Any
 from app.core.config import settings
 
 
-def results_worksheet_title() -> str:
-    """Имя листа с ответами студентов: ``GOOGLE_SHEET_RESULTS_TAB`` (по умолчанию ``students_answers``)."""
-    return (settings.google_sheet_results_tab or "students_answers").strip() or "students_answers"
+def results_worksheet_title(discipline_id: str | None = None) -> str:
+    """Имя листа с ответами: ``GOOGLE_SHEET_RESULTS_TAB`` или переопределение из ``DISCIPLINE_RESULTS_TABS_JSON``."""
+    return settings.results_worksheet_for_discipline(discipline_id)
 
 
 def resolve_credentials_path(explicit: str | None = None) -> str:
@@ -109,6 +109,7 @@ def build_student_answer_row(
     discipline_slug: str,
     course_name: str,
     control_type: str,
+    group_number: str = "",
     student_fio: str,
     question_key: str,
     score_display: str,
@@ -127,6 +128,7 @@ def build_student_answer_row(
         discipline_slug=discipline_slug,
         course_name=course_name,
         control_type=control_type,
+        group_number=group_number,
         student_fio=student_fio,
         question_key=question_key,
         score_display=score_display,

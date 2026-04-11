@@ -3,9 +3,10 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.services import evaluation_service, speech_service
+from app.services.exam_text_parsing import strip_answer_completion_markers
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,14 @@ async def evaluate_voice(
 ):
     """Распознавание речи и оценка: рубрика (JSON) или семантическое сходство 0–1 по эмбеддингам (нужен OPENAI_API_KEY)."""
     audio_bytes = await audio.read()
-    transcript = await speech_service.transcribe(audio_bytes, language=language)
+    transcript = strip_answer_completion_markers(
+        (await speech_service.transcribe(audio_bytes, language=language)).strip(),
+    )
+    if not transcript:
+        raise HTTPException(
+            status_code=400,
+            detail="После удаления служебных фраз о конце ответа не осталось текста для оценки.",
+        )
 
     if evaluation_service.use_rubric_scoring():
         r = await evaluation_service.evaluate_rubric(transcript, reference)
@@ -54,6 +62,12 @@ async def evaluate_text(
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
 ):
     """Текстовый ответ: рубрика или семантическое сходство по эмбеддингам — как у голоса."""
+    student_answer = strip_answer_completion_markers(student_answer.strip())
+    if not student_answer:
+        raise HTTPException(
+            status_code=400,
+            detail="После удаления служебных фраз о конце ответа не осталось текста для оценки.",
+        )
     if evaluation_service.use_rubric_scoring():
         r = await evaluation_service.evaluate_rubric(student_answer, reference)
         return {

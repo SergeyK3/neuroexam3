@@ -101,6 +101,74 @@ def test_transition_speech_markers():
     assert "второму" in parts["Q2"]
 
 
+def test_bilet_preamble_merges_to_first_spoken_key_not_first_sheet_row():
+    """Преамбула с билетом — к первому произнесённому шифру, не к первой строке эталонов."""
+    t = (
+        "Билет номер 17. Первый вопрос. Кратко про формулировку. "
+        "Ключ вопроса 1-1-10. Ответ. Электронные медицинские карты — это система."
+    )
+    keys = ["1-1-1", "1-1-10"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert not (parts.get("1-1-1") or "").strip()
+    assert "Билет" in (parts.get("1-1-10") or "")
+    assert "Электронные" in (parts.get("1-1-10") or "")
+
+
+def test_preamble_before_klyuch_goes_to_first_table_key():
+    """Текст до первого «Ключ …» — первый вопрос (первая строка эталонов), не теряется."""
+    t = (
+        "Краткий ответ про МИС и регистры. Затем второй блок. "
+        "Как структурирована библиотека? Ключ 1-5-9. Ответ. Корпоративная библиотека — это система."
+    )
+    keys = ["MIS_KEY", "1-5-9"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert "МИС" in parts["MIS_KEY"] or "регистр" in parts["MIS_KEY"].lower()
+    assert "Корпоративная" in parts["1-5-9"] or "библиотек" in parts["1-5-9"].lower()
+
+
+def test_key_speech_klyuch_voprosa_before_digit_code():
+    """«Ключ вопроса 1-5-9» — между словом «ключ» и шифром может быть «вопроса» (раньше ломало разметку)."""
+    t = (
+        "Вступление про МИС. Ключ вопроса 1-5-9. Корпоративная библиотека — это система. "
+        "Шифр 2-2-2. Второй фрагмент."
+    )
+    keys = ["MIS_KEY", "1-5-9", "2-2-2"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert "МИС" in parts["MIS_KEY"] or "Вступление" in parts["MIS_KEY"]
+    assert "Корпоративная" in parts["1-5-9"] or "библиотек" in parts["1-5-9"].lower()
+    assert "Второй" in parts["2-2-2"]
+
+
+def test_key_speech_shifr_and_po_shifru():
+    t = "По шифру 9-9-9, рассказываю про регистры. Ключ 8-8-8. Про библиотеку."
+    keys = ["9-9-9", "8-8-8"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert "регистр" in parts["9-9-9"].lower()
+    assert "библиотек" in parts["8-8-8"].lower()
+
+
+def test_inline_klyuch_typo_digit_key_maps_to_sheet():
+    """Вопрос в тексте, затем «Ключ 1-5-8.» — в эталоне 1-5-9; не привязывать ко второму ключу таблицы."""
+    t = (
+        "Как структурирована корпоративная библиотека в медучреждениях? Ключ 1-5-8. Ответ. "
+        "Корпоративная библиотека — это структурированная система."
+    )
+    keys = ["1-5-9", "OTHER_KEY"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert "Корпоративная библиотека" in parts["1-5-9"]
+    assert parts.get("OTHER_KEY", "") == ""
+
+
 def test_russian_ordinal_first_second_question_exam_style():
     """Как в устном ответе: «первый вопрос, ключ …» и отдельно «Второй вопрос.» без «вопрос 2»."""
     t = (

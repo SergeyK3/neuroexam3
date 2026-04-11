@@ -26,7 +26,7 @@ class ExamSession:
     state: ExamState = ExamState.START
     start_time: float = 0.0
     language: str | None = None  # ru | kk | en
-    # По порядку: дисциплина → вид контроля → ФИО (накапливается из одного или нескольких сообщений)
+    # По порядку: дисциплина → вид контроля → номер группы → ФИО (одно или несколько сообщений)
     registration_parts: list[str] = field(default_factory=list)
     registration_raw: str | None = None
     # Номер экзаменационного билета (из текста/транскрипта, см. exam_text_parsing.extract_ticket_number)

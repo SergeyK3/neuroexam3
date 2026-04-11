@@ -62,36 +62,41 @@ def test_registration_accumulates_over_messages():
     s = ExamSession(user_id=5, state=ExamState.REGISTRATION, language="ru")
     out = fsm_service.process_message(s, text="Информатика в медицине", has_voice=False, is_start_command=False)
     assert out.session.state == ExamState.REGISTRATION
-    assert "(1/3)" in "\n".join(out.messages)
+    assert "(1/4)" in "\n".join(out.messages)
     assert len(out.session.registration_parts) == 1
 
     out2 = fsm_service.process_message(out.session, text="Экзамен", has_voice=False, is_start_command=False)
     assert out2.session.state == ExamState.REGISTRATION
-    assert "(2/3)" in "\n".join(out2.messages)
+    assert "(2/4)" in "\n".join(out2.messages)
 
-    out3 = fsm_service.process_message(out2.session, text="Иванов Иван Иванович", has_voice=False, is_start_command=False)
+    out_g = fsm_service.process_message(out2.session, text="Гр-5", has_voice=False, is_start_command=False)
+    assert out_g.session.state == ExamState.REGISTRATION
+    assert "(3/4)" in "\n".join(out_g.messages)
+
+    out3 = fsm_service.process_message(out_g.session, text="Иванов Иван Иванович", has_voice=False, is_start_command=False)
     assert out3.session.state == ExamState.ANSWERING
     raw = out3.session.registration_raw or ""
-    assert "Информатика" in raw and "Экзамен" in raw and "Иванов" in raw
+    assert "Информатика" in raw and "Экзамен" in raw and "Гр-5" in raw and "Иванов" in raw
 
 
-def test_registration_one_message_three_lines():
+def test_registration_one_message_four_lines():
     s = ExamSession(user_id=55, state=ExamState.REGISTRATION, language="ru")
     out = fsm_service.process_message(
         s,
-        text="Информатика\nЭкзамен\nИванов Иван Иванович",
+        text="Информатика\nЭкзамен\n101\nИванов Иван Иванович",
         has_voice=False,
         is_start_command=False,
     )
     assert out.session.state == ExamState.ANSWERING
     assert "Информатика" in (out.session.registration_raw or "")
+    assert "101" in (out.session.registration_raw or "")
 
 
-def test_registration_three_parts_semicolon():
+def test_registration_four_parts_semicolon():
     s = ExamSession(user_id=6, state=ExamState.REGISTRATION, language="ru")
     out = fsm_service.process_message(
         s,
-        text="Информатика; рубежный контроль; Иванов Иван Иванович",
+        text="Информатика; рубежный контроль; Гр-2; Иванов Иван Иванович",
         has_voice=False,
         is_start_command=False,
     )

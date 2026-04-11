@@ -19,17 +19,28 @@ from app.services import (
     speech_service,
 )
 from app.services.evaluation_service import RubricScores
-from app.services.exam_text_parsing import extract_ticket_number
+from app.services.exam_text_parsing import (
+    extract_answer_body_for_evaluation,
+    extract_ticket_number,
+    split_at_otvet_marker,
+    strip_answer_completion_markers,
+)
 
 logger = logging.getLogger(__name__)
 
 _START_RE = re.compile(r"^/start(?:@\w+)?(?:\s|$)", re.IGNORECASE)
+# Текст начинается с реквизитов билета — в чате сначала вводная, потом строка ключа (не наоборот).
+_BILLET_OR_EXAM_LEAD = re.compile(
+    r"(?is)^\s*(?:билет|номер\s+билета|экзаменационн(?:ый|ого)\s+билет|№\s*билета)",
+)
 
 
 def _normalize_user_text(text: str) -> str:
     """NFC + убрать невидимые символы (ZWSP и т.д.), мешающие распознать /start."""
     t = unicodedata.normalize("NFC", text).strip()
     return re.sub(r"[\u200b\u200c\u200d\ufeff]", "", t)
+
+
 def _rubric_rationale_for_sheet(r: RubricScores) -> str:
     """Текст для колонки rationale в Google Sheets (рубрика)."""
     parts: list[str] = []
@@ -45,28 +56,51 @@ def _rubric_rationale_for_sheet(r: RubricScores) -> str:
 
 
 def _rubric_lines(question_ordinal: int, r: RubricScores) -> list[str]:
-    """Текст для Telegram: без кодов ключей из таблицы — только порядковый «Вопрос N»."""
-    lines = [
-        f"• Вопрос {question_ordinal}",
-        f"  — полнота: {r.content_score}/60",
-        f"  — точность: {r.accuracy_score}/20",
-        f"  — структура: {r.structure_score}/10",
-        f"  — отсутствие лишнего: {r.conciseness_score}/10",
-        f"  — итого: {r.total}/100",
-    ]
-    rationale_parts: list[str] = []
-    if (r.content_rationale or "").strip():
-        rationale_parts.append(f"  — Полнота: {_truncate_block(r.content_rationale, 900)}")
-    if (r.accuracy_rationale or "").strip():
-        rationale_parts.append(f"  — Точность: {_truncate_block(r.accuracy_rationale, 900)}")
-    if (r.structure_rationale or "").strip():
-        rationale_parts.append(f"  — Структура: {_truncate_block(r.structure_rationale, 900)}")
-    if (r.conciseness_rationale or "").strip():
-        rationale_parts.append(f"  — Без лишнего: {_truncate_block(r.conciseness_rationale, 900)}")
-    if rationale_parts:
-        lines.append("  Обоснование:")
-        lines.extend(rationale_parts)
+    """Telegram: заголовок вопроса, затем обоснование — балл в конце каждого пункта (итого — после «Без лишнего»)."""
+    lines: list[str] = [f"• Вопрос {question_ordinal}", "  Обоснование:"]
+
+    def _item(title: str, rationale: str | None, score: int, max_pts: int) -> str:
+        body = (rationale or "").strip()
+        if body:
+            return f"  — {title}: {_truncate_block(body, 900)} — {score}/{max_pts}"
+        return f"  — {title}: — {score}/{max_pts}"
+
+    lines.append(_item("Полнота", r.content_rationale, r.content_score, 60))
+    lines.append(_item("Точность", r.accuracy_rationale, r.accuracy_score, 20))
+    lines.append(_item("Структура", r.structure_rationale, r.structure_score, 10))
+    c_body = (r.conciseness_rationale or "").strip()
+    if c_body:
+        lines.append(
+            f"  — Без лишнего: {_truncate_block(c_body, 900)} — {r.conciseness_score}/10 · "
+            f"итого: {r.total}/100",
+        )
+    else:
+        lines.append(
+            f"  — Без лишнего: — {r.conciseness_score}/10 · итого: {r.total}/100",
+        )
     return lines
+
+
+def _telegram_answer_chrono_block(key: str, seg: str) -> str:
+    """
+    Порядок для чата: вводная (билет, формулировка вопроса) → ключ из эталона → суть ответа.
+    Оценка добавляется вызывающим кодом только после этого блока.
+    """
+    head, tail = split_at_otvet_marker(seg)
+    parts: list[str] = []
+    if head:
+        parts.append(head.strip())
+        parts.append(f"Ключ вопроса: {key}")
+        if tail:
+            parts.append(tail.strip())
+        return "\n\n".join(p for p in parts if p).strip()
+    # Нет «Ответ.»: весь текст в tail; если он начинается с билета — не ставить ключ выше билета.
+    t = (tail or "").strip()
+    if not t:
+        return f"Ключ вопроса: {key}"
+    if _BILLET_OR_EXAM_LEAD.match(t):
+        return f"{t}\n\nКлюч вопроса: {key}".strip()
+    return f"Ключ вопроса: {key}\n\n{t}".strip()
 
 
 def _truncate_block(text: str, max_len: int = 2000) -> str:
@@ -99,13 +133,18 @@ def _preview_recognized_text(
     *,
     max_len: int = 1200,
 ) -> str:
-    """Для нескольких фрагментов — пустая строка между блоками; иначе исходный транскрипт."""
+    """Фрагменты с подписью ключа вопроса; при отсутствии непустых фрагментов — исходный транскрипт."""
     chunks: list[str] = []
     for k in keys:
         seg = (parts.get(k) or "").strip()
         if seg:
-            chunks.append(seg)
-    text = "\n\n".join(chunks) if len(chunks) >= 2 else transcript.strip()
+            chunks.append(f"Ключ вопроса: {k}\n{seg}")
+    if len(chunks) >= 2:
+        text = "\n\n".join(chunks)
+    elif len(chunks) == 1:
+        text = chunks[0]
+    else:
+        text = transcript.strip()
     if len(text) > max_len:
         return text[:max_len] + "…"
     return text
@@ -136,8 +175,21 @@ async def _evaluate_and_reply(
     ticket_number: str | None = None,
 ) -> None:
     """Сегментация по ключам (Google Sheets или .env), оценка каждого непустого фрагмента."""
+    cleaned = strip_answer_completion_markers((transcript or "").strip())
+    if not cleaned:
+        await telegram_client.send_message(
+            chat_id,
+            "После удаления служебных фраз вроде «ответ закончен» не осталось текста для оценки. "
+            "Пришлите ответ ещё раз (можно без фразы о конце ответа).",
+        )
+        return
+    transcript = cleaned
+
     try:
-        ref_map = await reference_map_service.get_reference_map(discipline_id)
+        ref_map = await reference_map_service.get_reference_map(
+            discipline_id,
+            registration_raw=registration_raw,
+        )
     except ValueError as e:
         await telegram_client.send_message(
             chat_id,
@@ -190,25 +242,30 @@ async def _evaluate_and_reply(
         ref = ref_map[key]
         if not seg:
             continue
+        seg_eval = extract_answer_body_for_evaluation(seg)
+        if not seg_eval.strip():
+            seg_eval = seg
         question_ordinal += 1
         if not first_answer:
             lines.append("")
-        lines.append(_truncate_block(seg))
+        # Сначала хронология (билет → вопрос → ключ → ответ), затем — только оценка.
+        display_block = _telegram_answer_chrono_block(key, seg)
+        lines.append(_truncate_block(display_block, max_len=3500))
         lines.append("")
 
         if use_rubric:
             try:
-                r = await evaluation_service.evaluate_rubric(seg, ref)
+                r = await evaluation_service.evaluate_rubric(seg_eval, ref)
             except (ValueError, RuntimeError) as e:
                 lines.append(f"• Вопрос {question_ordinal}: ошибка оценки: {e}")
                 first_answer = False
                 continue
             lines.extend(_rubric_lines(question_ordinal, r))
             rubric_totals.append(r.total)
-            scored.append((key, str(r.total), seg, _rubric_rationale_for_sheet(r)))
+            scored.append((key, str(r.total), seg_eval, _rubric_rationale_for_sheet(r)))
         else:
             try:
-                sim = await evaluation_service.evaluate_similarity(seg, ref)
+                sim = await evaluation_service.evaluate_similarity(seg_eval, ref)
             except ValueError as e:
                 lines.append(f"• Вопрос {question_ordinal}: ошибка оценки: {e}")
                 first_answer = False
@@ -216,7 +273,7 @@ async def _evaluate_and_reply(
             lines.append(f"• Вопрос {question_ordinal}")
             lines.append(f"  — сходство: {sim:.4f}")
             sim_scores.append(sim)
-            scored.append((key, f"{sim:.4f}", seg, ""))
+            scored.append((key, f"{sim:.4f}", seg_eval, ""))
 
         first_answer = False
 
@@ -269,15 +326,17 @@ async def _handle_voice_answering(
         audio = await telegram_client.download_file_bytes(file_id)
         lang = sess.language or "ru"
         transcript = await speech_service.transcribe(audio, language=lang)
-        sess.last_transcript = transcript
-        tn = extract_ticket_number(transcript)
+        raw_tr = (transcript or "").strip()
+        tn = extract_ticket_number(raw_tr)
         if tn:
             sess.ticket_number = tn
+        cleaned_tr = strip_answer_completion_markers(raw_tr)
+        sess.last_transcript = cleaned_tr or raw_tr
         mid_raw = message.get("message_id")
         msg_id = mid_raw if isinstance(mid_raw, int) else None
         await _evaluate_and_reply(
             chat_id,
-            transcript,
+            cleaned_tr,
             telegram_user_id=user_id,
             session_id=sess.session_id,
             discipline_id=sess.discipline_id,
@@ -375,15 +434,17 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
         await telegram_client.send_message(chat_id, line)
 
     if out.evaluate_text:
-        out.session.last_transcript = out.evaluate_text.strip()
-        tn = extract_ticket_number(out.evaluate_text)
+        raw_eval = out.evaluate_text.strip()
+        tn = extract_ticket_number(raw_eval)
         if tn:
             out.session.ticket_number = tn
+        cleaned_eval = strip_answer_completion_markers(raw_eval)
+        out.session.last_transcript = cleaned_eval or raw_eval
         mid_raw = message.get("message_id")
         msg_id = mid_raw if isinstance(mid_raw, int) else None
         await _evaluate_and_reply(
             chat_id,
-            out.evaluate_text,
+            cleaned_eval,
             telegram_user_id=user_id,
             session_id=out.session.session_id,
             discipline_id=out.session.discipline_id,

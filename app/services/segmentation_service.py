@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import logging
 import re
@@ -10,23 +11,98 @@ import unicodedata
 logger = logging.getLogger(__name__)
 
 
+def _unify_hyphens(s: str) -> str:
+    """Единый ASCII-дефис для сравнения кодов вида 1-5-9."""
+    return re.sub(r"[‑–—]", "-", (s or ""))
+
+
+def _typo_correct_digit_triple_tokens(transcript: str, keys: list[str]) -> str:
+    """
+    Подмена в тексте кодов N-N-N на ближайший ключ из эталона (1-5-8 → 1-5-9),
+    если в таблице нет точного совпадения (опечатка / STT).
+    """
+    keys_u = [_unify_hyphens(k) for k in keys]
+    digit_keys = [k for k in keys_u if re.fullmatch(r"\d+-\d+-\d+", k)]
+    if not digit_keys:
+        return transcript
+
+    def repl(m: re.Match[str]) -> str:
+        raw = m.group(0)
+        tok = _unify_hyphens(raw)
+        if tok in digit_keys:
+            return tok
+        # 1-5-8 vs 1-5-9 даёт ratio ≈ 0.8 — cutoff 0.82 был слишком строгим.
+        cm = difflib.get_close_matches(tok, digit_keys, n=1, cutoff=0.75)
+        return cm[0] if cm else raw
+
+    return re.sub(r"\d+(?:[‑–—\-]\d+){2}", repl, transcript)
+
+
 def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
-    """Ищет блоки вида «Q1: текст» или «Q1 — текст» по строкам."""
+    """
+    Блоки «КЛЮЧ: тело» / «КЛЮЧ — тело» / «КЛЮЧ. тело» по всему тексту.
+    Допускает «? Ключ 1-5-9. Ответ…» (не только с начала строки), исправляет опечатки 1-5-8→1-5-9.
+    """
     if not keys:
         return None
-    pattern = "|".join(re.escape(k) for k in keys)
-    rx = re.compile(
-        rf"(?mis)^\s*({pattern})\s*[:\-–]\s*(.+?)(?=^\s*(?:{pattern})\s*[:\-–]|\Z)",
+    t = unicodedata.normalize("NFC", (transcript or "").strip())
+    t = _unify_hyphens(t)
+    t = _typo_correct_digit_triple_tokens(t, keys)
+    # Длинные ключи первыми, чтобы «1-5-10» не резалось как «1-5-1» + «0…»
+    pattern = "|".join(sorted((re.escape(_unify_hyphens(k)) for k in keys), key=len, reverse=True))
+    # Устные вводные перед шифром из бланка: не только «ключ …», но и «ключ вопроса …»,
+    # «шифр», «код вопроса», «по шифру …» и т.д. (STT и привычки экзаменуемых различаются).
+    _key_speech_intro = (
+        r"(?:"
+        r"ключ(?:\s*вопроса)?|"
+        r"шифр(?:\s*вопроса)?|"
+        r"код(?:\s*вопроса)?|"
+        r"номер\s*(?:вопроса|ключа)?|"
+        r"обозначение|"
+        r"по\s+(?:шифру|коду|ключу)|"
+        r"вопрос\s+с\s+(?:кодом|шифром|ключом)"
+        r")\s*[:.;,]?\s*"
     )
-    matches = list(rx.finditer(transcript))
-    if len(matches) < 2:
+    # После кода: двоеточие/тире/точка или запятая («1-5-9, далее…»).
+    pat = re.compile(
+        rf"(?is)(?:^|[,.;:!?]\s+|\n\s*)(?:{_key_speech_intro})?({pattern})\s*(?:[:\-–.;]|,\s+)",
+    )
+    matches = list(pat.finditer(t))
+    if not matches:
         return None
     out: dict[str, str] = {k: "" for k in keys}
-    for m in matches:
-        key, body = m.group(1).strip(), m.group(2).strip()
-        if key in out:
-            out[key] = body
-    if sum(1 for v in out.values() if v.strip()) >= 2:
+    unify_map = {_unify_hyphens(k): k for k in keys}
+    for i, m in enumerate(matches):
+        uk = _unify_hyphens(m.group(1).strip())
+        canon = unify_map.get(uk)
+        if canon is None:
+            continue
+        start_body = m.end()
+        end_body = matches[i + 1].start() if i + 1 < len(matches) else len(t)
+        body = t[start_body:end_body].strip()
+        out[canon] = body
+    # Текст до первого явного шифра: по умолчанию — к первой строке эталонов (ввод без «билета»).
+    # Если во вводной есть номер билета — тот же устной связкой идёт первый произнесённый ключ (mk),
+    # иначе преамбула ошибочно попадает в keys[0] и даёт лишнюю «оценку» без ответа (другой шифр в речи).
+    _pre_has_bilet = re.compile(
+        r"(?i)билет|номер\s+билета|экзаменационн(?:ый|ого)\s+билет|№\s*билета",
+    )
+    if matches and matches[0].start() > 0:
+        pre = t[: matches[0].start()].strip()
+        if pre:
+            m0 = matches[0]
+            mk = unify_map.get(_unify_hyphens(m0.group(1).strip()))
+            if mk is not None:
+                fk = keys[0]
+                if _pre_has_bilet.search(pre):
+                    target = mk
+                else:
+                    target = fk if mk != fk else mk
+                cur = (out.get(target) or "").strip()
+                out[target] = (pre + ("\n\n" + cur if cur else "")).strip()
+    nonempty = sum(1 for v in out.values() if v.strip())
+    # Один явный «Ключ 1-5-9. …» достаточен, чтобы не уводить текст на «второй вопрос» = keys[1].
+    if nonempty >= 1:
         return out
     return None
 
@@ -94,8 +170,26 @@ def _trim_leading_question_key_phrase(segment: str) -> str:
         s,
         count=1,
     )
-    # строка-ярлык «ключ …» до конца предложения (любой текст, не значения из конфига)
-    s = re.sub(r"(?is)^\s*ключ\s*[^\n.]*[.\n]\s*", "", s, count=1)
+    # Строка-ярлык «ключ / ключ вопроса / шифр / код …» до точки или переноса
+    s = re.sub(
+        r"(?is)^\s*(?:"
+        r"ключ(?:\s*вопроса)?|шифр(?:\s*вопроса)?|код(?:\s*вопроса)?|"
+        r"номер\s*(?:вопроса|ключа)?|обозначение|по\s+(?:шифру|коду|ключу)"
+        r")\s*[^\n.]*[.\n]\s*",
+        "",
+        s,
+        count=1,
+    )
+    # Тот же смысл, но без точки: «Ключ вопроса:» / «Шифр:» в начале фрагмента
+    s = re.sub(
+        r"(?is)^\s*(?:"
+        r"ключ(?:\s*вопроса)?|шифр(?:\s*вопроса)?|код(?:\s*вопроса)?|"
+        r"номер\s*(?:вопроса|ключа)?|обозначение"
+        r")\s*[:.;]+\s*",
+        "",
+        s,
+        count=1,
+    )
     s = re.sub(
         r"(?is)^\s*вопрос\s*(?:номер\s*|№\s*)?\d+\s*[,;]?\s*(?:ключ\s*\d+\s*[,;]?\s*)?",
         "",
@@ -273,7 +367,9 @@ async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, 
         "Ты помогаешь разобрать ответы студента на экзамене. "
         f"Даны ключи вопросов (в таком порядке): {keys_json}.\n"
         "Ниже единый транскрипт (возможно несколько ответов подряд). "
-        "Раздели текст на фрагменты по смыслу для каждого ключа. Если для ключа ничего нет — пустая строка.\n"
+        "Раздели текст на фрагменты по смыслу для каждого ключа. Студент может обозначать вопрос по-разному "
+        "(«ключ …», «ключ вопроса …», «шифр», «код», «номер вопроса», порядковые «первый/второй вопрос» и т.п.). "
+        "Если для ключа ничего нет — пустая строка.\n"
         "Верни ТОЛЬКО JSON-объект: ключи — те же строки, значения — фрагменты ответа.\n\n"
         f"Транскрипт:\n{transcript}"
     )

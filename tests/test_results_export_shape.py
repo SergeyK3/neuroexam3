@@ -19,11 +19,23 @@ def test_build_result_row_matches_header_len():
         rationale="обоснование",
     )
     assert len(row) == len(sheets_client._RESULT_HEADER)
+    # Колонка «Ответ на билет»: ключ вопроса в начале текста ячейки
+    assert row[9].startswith("Ключ вопроса: Q1\n\nфрагмент")
 
 
-def test_parse_registration_three_lines():
+def test_parse_registration_three_lines_legacy_no_group():
     raw = "Медицина\nЭкзамен\nПетров П.П."
-    a, b, c = results_export_service._parse_registration_lines(raw)
+    a, b, g, c = results_export_service._parse_registration_lines(raw)
     assert a == "Медицина"
     assert b == "Экзамен"
+    assert g == ""
+    assert c == "Петров П.П."
+
+
+def test_parse_registration_four_lines():
+    raw = "Медицина\nЭкзамен\nГр-12\nПетров П.П."
+    a, b, g, c = results_export_service._parse_registration_lines(raw)
+    assert a == "Медицина"
+    assert b == "Экзамен"
+    assert g == "Гр-12"
     assert c == "Петров П.П."

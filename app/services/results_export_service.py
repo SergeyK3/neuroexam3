@@ -13,18 +13,23 @@ from app.services import reference_map_service
 logger = logging.getLogger(__name__)
 
 
-def _parse_registration_lines(raw: str | None) -> tuple[str, str, str]:
-    """Три поля регистрации: дисциплина/курс, вид контроля, ФИО (как в FSM)."""
+def _parse_registration_lines(raw: str | None) -> tuple[str, str, str, str]:
+    """Четыре поля регистрации: дисциплина/курс, вид контроля, номер группы, ФИО (как в FSM).
+
+    Три строки без номера группы (старый формат) трактуются как: курс, контроль, ФИО; группа пустая.
+    """
     if not raw or not str(raw).strip():
-        return ("", "", "")
+        return ("", "", "", "")
     lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
-    if len(lines) >= 3:
-        return (lines[0], lines[1], lines[2])
+    if len(lines) >= 4:
+        return (lines[0], lines[1], lines[2], lines[3])
+    if len(lines) == 3:
+        return (lines[0], lines[1], "", lines[2])
     if len(lines) == 2:
-        return (lines[0], lines[1], "")
+        return (lines[0], lines[1], "", "")
     if len(lines) == 1:
-        return (lines[0], "", "")
-    return ("", "", "")
+        return (lines[0], "", "", "")
+    return ("", "", "", "")
 
 
 async def export_question_scores(
@@ -43,8 +48,11 @@ async def export_question_scores(
     При отсутствии credentials / id таблицы — no-op.
     """
     creds = settings.google_creds_path()
-    sheet_id = reference_map_service.spreadsheet_id_for_discipline(discipline_id)
-    tab = results_worksheet_title()
+    sheet_id = reference_map_service.spreadsheet_id_for_discipline(
+        discipline_id,
+        registration_raw=registration_raw,
+    )
+    tab = results_worksheet_title(discipline_id)
     if not creds or not sheet_id:
         if not creds:
             logger.warning(
@@ -63,7 +71,7 @@ async def export_question_scores(
         return
 
     slug = (discipline_id or settings.default_discipline or "").strip() or "-"
-    course_name, control_type, student_fio = _parse_registration_lines(registration_raw)
+    course_name, control_type, group_number, student_fio = _parse_registration_lines(registration_raw)
 
     for question_key, score_display, excerpt, rationale in scored_rows:
         row = sheets_client.build_result_row(
@@ -72,6 +80,7 @@ async def export_question_scores(
             discipline_slug=slug,
             course_name=course_name,
             control_type=control_type,
+            group_number=group_number,
             student_fio=student_fio,
             question_key=question_key,
             score_display=score_display,

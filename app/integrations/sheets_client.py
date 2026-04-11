@@ -7,7 +7,7 @@ import logging
 import os
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,37 @@ _REF_HEADER = frozenset(
         "etalon",
         "эталон",
         "reference_answer",
+        # Русские шапки без слова «эталон» — иначе не находится колонка эталона,
+        # парсер падает в режим «все строки — данные» и первая строка даёт ключ «Ключ».
+        "идеальный ответ",
+        "идеальный",
+        "образец",
+        "образец ответа",
+        "полный ответ",
+        "текст ответа",
+        "правильный ответ",
+    },
+)
+
+# Значение в ячейке «ключ» не бывает реальным шифром вопроса — это шапка, попавшая в данные.
+_PLACEHOLDER_KEY_CELLS = frozenset(
+    {
+        "ключ",
+        "key",
+        "question_key",
+        "question key",
+        "код",
+        "код вопроса",
+        "ключ вопроса",
+        "ключ вопроса (шифр)",
+        "шифр",
+        "№",
+        "n",
+        "#",
+        "номер",
+        "номер вопроса",
+        "вопрос",
+        "question",
     },
 )
 
@@ -54,13 +85,43 @@ def _find_col(headers: list[str], aliases: frozenset[str]) -> int | None:
     return None
 
 
+def _infer_other_col_idx(
+    headers: list[str],
+    fixed_idx: int,
+    prefer_aliases: frozenset[str],
+) -> int | None:
+    """При известной одной колонке — взять другую: сначала по алиасам, иначе крайнюю справа от fixed."""
+    ncols = len(headers)
+    if ncols < 2:
+        return None
+    for i, h in enumerate(headers):
+        if i == fixed_idx:
+            continue
+        if _find_col([h], prefer_aliases) is not None:
+            return i
+    for i in range(ncols - 1, -1, -1):
+        if i != fixed_idx:
+            return i
+    return None
+
+
+def _is_placeholder_key_cell(k: str) -> bool:
+    return _normalize_header(k) in _PLACEHOLDER_KEY_CELLS
+
+
 def _parse_table(rows: list[list[Any]]) -> dict[str, str]:
     if not rows:
         return {}
     headers = [_normalize_header(str(c or "")) for c in rows[0]]
     idx_k = _find_col(headers, _KEY_HEADER)
     idx_r = _find_col(headers, _REF_HEADER)
-    if idx_k is not None and idx_r is not None:
+
+    if idx_k is not None and idx_r is None and len(headers) >= 2:
+        idx_r = _infer_other_col_idx(headers, idx_k, _REF_HEADER)
+    elif idx_r is not None and idx_k is None and len(headers) >= 2:
+        idx_k = _infer_other_col_idx(headers, idx_r, _KEY_HEADER)
+
+    if idx_k is not None and idx_r is not None and idx_k != idx_r:
         data_rows = rows[1:]
     else:
         idx_k, idx_r = 0, 1
@@ -72,8 +133,11 @@ def _parse_table(rows: list[list[Any]]) -> dict[str, str]:
             continue
         k = str(row[idx_k] or "").strip()
         v = str(row[idx_r] or "").strip()
-        if k and v:
-            out[k] = v
+        if not k or not v:
+            continue
+        if _is_placeholder_key_cell(k):
+            continue
+        out[k] = v
     return out
 
 
@@ -125,6 +189,7 @@ _RESULT_HEADER = (
     "Название дисциплины",
     "Название контроля",
     "Дата и время начала ответа",
+    "Номер группы",
     "ФИО студента",
     "Оценка",
     "Номер билета",
@@ -185,6 +250,15 @@ async def append_student_result_row(
     )
 
 
+# Алматинское время: фиксированное смещение UTC+5 (как у Asia/Almaty, без DST).
+_ALMATY_OFFSET = timedelta(hours=5)
+
+
+def _answer_started_at_almaty_display() -> str:
+    t = datetime.now(UTC) + _ALMATY_OFFSET
+    return t.strftime("%Y-%m-%d %H:%M:%S") + " (Алматы UTC+5)"
+
+
 def _clip(text: str, max_len: int) -> str:
     t = (text or "").strip()
     if len(t) <= max_len:
@@ -199,6 +273,7 @@ def build_result_row(
     discipline_slug: str,
     course_name: str,
     control_type: str,
+    group_number: str = "",
     student_fio: str,
     question_key: str,
     score_display: str,
@@ -210,10 +285,16 @@ def build_result_row(
 ) -> list[Any]:
     """
     Одна строка листа students_answers. Оценка — балл 0–100 или сходство 0–1 как строка.
-    Колонка «Ответ на билет» — фрагмент по данному ключу; при пустом фрагменте — обрезанный полный транскрипт.
+    Колонка «Ответ на билет» — фрагмент по данному ключу (с явной строкой «Ключ вопроса: …» в начале);
+    при пустом фрагменте — обрезанный полный транскрипт с тем же префиксом ключа.
     """
-    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
-    answer_cell = (answer_excerpt or "").strip() or (full_transcript or "").strip()
+    ts = _answer_started_at_almaty_display()
+    body = (answer_excerpt or "").strip() or (full_transcript or "").strip()
+    qk = (question_key or "").strip()
+    if qk:
+        answer_cell = f"Ключ вопроса: {qk}\n\n{body}".strip()
+    else:
+        answer_cell = body
     answer_cell = _clip(answer_cell, 8000)
     comment = _clip(
         "\n".join(
@@ -235,6 +316,7 @@ def build_result_row(
         _clip(course_name, 500),
         _clip(control_type, 300),
         ts,
+        _clip(group_number, 120),
         _clip(student_fio, 300),
         score_display,
         _clip(ticket_number, 200),

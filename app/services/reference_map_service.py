@@ -14,13 +14,24 @@ _cache: dict[str, tuple[float, dict[str, str]]] = {}
 _TTL_SEC = 120.0
 
 
-def spreadsheet_id_for_discipline(discipline_id: str | None) -> str | None:
-    """Публичный доступ к id таблицы для дисциплины (та же логика, что для эталонов)."""
-    return _sheet_id_for_session(discipline_id)
+def spreadsheet_id_for_discipline(
+    discipline_id: str | None,
+    registration_raw: str | None = None,
+) -> str | None:
+    """Публичный доступ к id таблицы (эталоны и результаты): см. _sheet_id_for_session."""
+    return _sheet_id_for_session(discipline_id, registration_raw)
 
 
-def _sheet_id_for_session(discipline_id: str | None) -> str | None:
-    """Определить spreadsheet id: карта дисциплин, иначе один GOOGLE_SHEET_ID."""
+def _sheet_id_for_session(
+    discipline_id: str | None,
+    registration_raw: str | None = None,
+) -> str | None:
+    """Spreadsheet id: приоритет — карта по полному названию из регистрации, иначе slug-карта или GOOGLE_SHEET_ID."""
+    sid = settings.spreadsheet_id_for_registration_course(registration_raw)
+    if sid:
+        logger.info("Таблица выбрана по 1-й строке регистрации (название дисциплины)")
+        return sid
+
     raw = (settings.discipline_google_sheet_ids_json or "").strip()
     if raw:
         try:
@@ -51,14 +62,17 @@ def _sheet_id_for_session(discipline_id: str | None) -> str | None:
     return single or None
 
 
-async def get_reference_map(discipline_id: str | None) -> dict[str, str]:
+async def get_reference_map(
+    discipline_id: str | None,
+    registration_raw: str | None = None,
+) -> dict[str, str]:
     """
     Загрузить эталоны. Если заданы credentials и id таблицы — читаем лист эталонов
     (имя задаётся в GOOGLE_SHEET_IDEAL_TAB, по умолчанию ``ideal_answers``). Иначе — MVP_REFERENCES_JSON / пара Q1+REFERENCE.
     """
     creds = settings.google_creds_path()
-    sheet_id = _sheet_id_for_session(discipline_id)
-    tab = (settings.google_sheet_ideal_tab or "ideal_answers").strip() or "ideal_answers"
+    sheet_id = _sheet_id_for_session(discipline_id, registration_raw)
+    tab = settings.ideal_worksheet_for_discipline(discipline_id)
 
     if creds and sheet_id:
         cache_key = f"{sheet_id}|{tab}"

@@ -8,14 +8,16 @@ from app.models.session import ExamSession, ExamState
 _REGISTRATION_LABELS = (
     "название дисциплины или курса",
     "вид контроля (рубежный контроль или экзамен)",
+    "номер группы",
     "ФИО полностью",
 )
 
 _REGISTRATION_PROMPT = (
-    "Нужны **три сведения по порядку**:\n"
+    "Нужны **четыре сведения по порядку**:\n"
     "1) Название дисциплины или курса\n"
     "2) Вид контроля (рубежный контроль или экзамен)\n"
-    "3) ФИО полностью\n\n"
+    "3) Номер группы\n"
+    "4) ФИО полностью\n\n"
     "Можно отправить **одним сообщением** (несколько строк или через `;` / `|`), "
     "или **несколькими сообщениями подряд** — если случайно нажали Enter, просто допишите в следующих сообщениях."
 )
@@ -29,6 +31,7 @@ _LANG_ALIASES = {
     "kk": "kk",
     "каз": "kk",
     "казахский": "kk",
+    "қазақ": "kk",
     "қазақша": "kk",
     "2": "kk",
     "en": "en",
@@ -85,8 +88,7 @@ def process_message(
         return FsmOutcome(
             session,
             [
-                "Пожалуйста, выберите язык экзамена: Русский, Казахский или Английский "
-                "(можно: Русский / Казахский / English или 1 / 2 / 3).",
+                "Пожалуйста, выберите язык экзамена: Русский (1), Қазақ (2) или English (3).",
             ],
         )
 
@@ -98,7 +100,10 @@ def process_message(
         if not key:
             return FsmOutcome(
                 session,
-                ["Нужно выбрать язык: Русский или Казахский (или 1 / 2)."],
+                [
+                    "Нужно выбрать язык: Русский (1), Қазақ (2) или English (3) "
+                    "(можно написать словом или цифрой).",
+                ],
             )
         session.language = key
         slugs = settings.ordered_discipline_slugs()
@@ -161,22 +166,22 @@ def process_message(
             return FsmOutcome(session, ["Отправьте непустой текст."])
         buf = list(session.registration_parts)
         for f in frags:
-            if len(buf) >= 3:
+            if len(buf) >= 4:
                 break
             buf.append(f)
         session.registration_parts = buf
-        if len(session.registration_parts) < 3:
+        if len(session.registration_parts) < 4:
             n = len(session.registration_parts)
             nxt = _REGISTRATION_LABELS[n]
             return FsmOutcome(
                 session,
                 [
-                    f"Принято ({n}/3). Дальше пришлите: **{nxt}** "
+                    f"Принято ({n}/4). Дальше пришлите: **{nxt}** "
                     f"(отдельным сообщением или вместе с остальным — как удобно). "
-                    f"Осталось полей: {3 - n}.",
+                    f"Осталось полей: {4 - n}.",
                 ],
             )
-        session.registration_raw = "\n".join(session.registration_parts[:3])
+        session.registration_raw = "\n".join(session.registration_parts[:4])
         session.registration_parts = []
         session.state = ExamState.ANSWERING
         return FsmOutcome(
