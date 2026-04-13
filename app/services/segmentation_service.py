@@ -8,12 +8,22 @@ import logging
 import re
 import unicodedata
 
+from app.models.question_bank import QuestionRecord
+from app.services.reference_map_service import normalize_question_key
+
 logger = logging.getLogger(__name__)
 
 
 def _unify_hyphens(s: str) -> str:
-    """Единый ASCII-дефис для сравнения кодов вида 1-5-9."""
-    return re.sub(r"[‑–—]", "-", (s or ""))
+    """Нормализация разделителей внутри текста без схлопывания всех цифр строки в один ключ."""
+    raw = unicodedata.normalize("NFC", (s or ""))
+    raw = re.sub(r"[‑–—]", "-", raw)
+    raw = re.sub(r"(?<=\d)\s*[,./]\s*(?=\d)", "-", raw)
+    return raw
+
+
+def _canon_key(s: str) -> str:
+    return normalize_question_key(_unify_hyphens(s))
 
 
 def _typo_correct_digit_triple_tokens(transcript: str, keys: list[str]) -> str:
@@ -21,21 +31,21 @@ def _typo_correct_digit_triple_tokens(transcript: str, keys: list[str]) -> str:
     Подмена в тексте кодов N-N-N на ближайший ключ из эталона (1-5-8 → 1-5-9),
     если в таблице нет точного совпадения (опечатка / STT).
     """
-    keys_u = [_unify_hyphens(k) for k in keys]
+    keys_u = [_canon_key(k) for k in keys]
     digit_keys = [k for k in keys_u if re.fullmatch(r"\d+-\d+-\d+", k)]
     if not digit_keys:
         return transcript
 
     def repl(m: re.Match[str]) -> str:
         raw = m.group(0)
-        tok = _unify_hyphens(raw)
+        tok = _canon_key(raw)
         if tok in digit_keys:
             return tok
         # 1-5-8 vs 1-5-9 даёт ratio ≈ 0.8 — cutoff 0.82 был слишком строгим.
         cm = difflib.get_close_matches(tok, digit_keys, n=1, cutoff=0.75)
         return cm[0] if cm else raw
 
-    return re.sub(r"\d+(?:[‑–—\-]\d+){2}", repl, transcript)
+    return re.sub(r"\d+(?:\s*[‑–—\-.,/]\s*\d+){2}", repl, transcript)
 
 
 def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
@@ -49,7 +59,8 @@ def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
     t = _unify_hyphens(t)
     t = _typo_correct_digit_triple_tokens(t, keys)
     # Длинные ключи первыми, чтобы «1-5-10» не резалось как «1-5-1» + «0…»
-    pattern = "|".join(sorted((re.escape(_unify_hyphens(k)) for k in keys), key=len, reverse=True))
+    norm_keys = [_canon_key(k) for k in keys]
+    pattern = "|".join(sorted((re.escape(k) for k in norm_keys), key=len, reverse=True))
     # Устные вводные перед шифром из бланка: не только «ключ …», но и «ключ вопроса …»,
     # «шифр», «код вопроса», «по шифру …» и т.д. (STT и привычки экзаменуемых различаются).
     _key_speech_intro = (
@@ -65,15 +76,15 @@ def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
     )
     # После кода: двоеточие/тире/точка или запятая («1-5-9, далее…»).
     pat = re.compile(
-        rf"(?is)(?:^|[,.;:!?]\s+|\n\s*)(?:{_key_speech_intro})?({pattern})\s*(?:[:\-–.;]|,\s+)",
+        rf"(?is)(?:^|[,.;:!?]\s+|\n\s*)(?:{_key_speech_intro})?({pattern})\s*(?:[:\-–.;]|,\s+|\s+)",
     )
     matches = list(pat.finditer(t))
     if not matches:
         return None
     out: dict[str, str] = {k: "" for k in keys}
-    unify_map = {_unify_hyphens(k): k for k in keys}
+    unify_map = {_canon_key(k): k for k in keys}
     for i, m in enumerate(matches):
-        uk = _unify_hyphens(m.group(1).strip())
+        uk = _canon_key(m.group(1).strip())
         canon = unify_map.get(uk)
         if canon is None:
             continue
@@ -91,7 +102,7 @@ def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
         pre = t[: matches[0].start()].strip()
         if pre:
             m0 = matches[0]
-            mk = unify_map.get(_unify_hyphens(m0.group(1).strip()))
+            mk = unify_map.get(_canon_key(m0.group(1).strip()))
             if mk is not None:
                 fk = keys[0]
                 if _pre_has_bilet.search(pre):
@@ -101,9 +112,12 @@ def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
                 cur = (out.get(target) or "").strip()
                 out[target] = (pre + ("\n\n" + cur if cur else "")).strip()
     nonempty = sum(1 for v in out.values() if v.strip())
-    # Один явный «Ключ 1-5-9. …» достаточен, чтобы не уводить текст на «второй вопрос» = keys[1].
-    if nonempty >= 1:
+    if nonempty >= min(2, len(keys)):
         return out
+    if nonempty == 1 and len(matches) == 1:
+        tail = t[matches[0].end() :]
+        if not re.search(r"(?i)\b(?:второй|третий|четвертый|четвёртый|следующий|другой)\s+вопрос\b", tail):
+            return out
     return None
 
 
@@ -349,11 +363,25 @@ def segment_transcript_to_keys(
     return out, None, True
 
 
-async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, str] | None:
+def _question_prompt_lines(questions: list[QuestionRecord]) -> str:
+    lines: list[str] = []
+    for i, q in enumerate(questions, start=1):
+        q_text = (q.question_text or "").strip()
+        if q_text:
+            lines.append(f"{i}. {q.question_key}: {q_text}")
+        else:
+            lines.append(f"{i}. {q.question_key}")
+    return "\n".join(lines)
+
+
+async def segment_transcript_llm(
+    transcript: str,
+    questions: list[QuestionRecord],
+) -> dict[str, str] | None:
     """Разбиение через chat completion (JSON). Нужен OPENAI_API_KEY."""
     from app.core.config import settings
 
-    if not settings.openai_api_key or len(keys) < 2:
+    if not settings.openai_api_key or len(questions) < 2:
         return None
 
     try:
@@ -362,10 +390,12 @@ async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, 
         return None
 
     client = AsyncOpenAI(api_key=settings.openai_api_key)
-    keys_json = json.dumps(keys, ensure_ascii=False)
+    keys_json = json.dumps([q.question_key for q in questions], ensure_ascii=False)
     prompt = (
         "Ты помогаешь разобрать ответы студента на экзамене. "
         f"Даны ключи вопросов (в таком порядке): {keys_json}.\n"
+        "Формулировки вопросов:\n"
+        f"{_question_prompt_lines(questions)}\n"
         "Ниже единый транскрипт (возможно несколько ответов подряд). "
         "Раздели текст на фрагменты по смыслу для каждого ключа. Студент может обозначать вопрос по-разному "
         "(«ключ …», «ключ вопроса …», «шифр», «код», «номер вопроса», порядковые «первый/второй вопрос» и т.п.). "
@@ -385,7 +415,8 @@ async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, 
     if not isinstance(data, dict):
         return None
     out: dict[str, str] = {}
-    for k in keys:
+    for q in questions:
+        k = q.question_key
         v = data.get(k)
         out[k] = v.strip() if isinstance(v, str) else ""
     return out
@@ -393,7 +424,7 @@ async def segment_transcript_llm(transcript: str, keys: list[str]) -> dict[str, 
 
 async def segment_with_fallback(
     transcript: str,
-    keys: list[str],
+    questions: list[QuestionRecord],
     *,
     use_llm: bool,
 ) -> tuple[dict[str, str], list[str]]:
@@ -401,19 +432,23 @@ async def segment_with_fallback(
     from app.core.config import settings
 
     notes: list[str] = []
+    keys = [q.question_key for q in questions]
     parts, config_err, try_llm_refinement = segment_transcript_to_keys(transcript, keys)
     if config_err:
         notes.append(config_err)
+    heuristic_nonempty = sum(1 for v in parts.values() if (v or "").strip())
+    if len(questions) > 1 and heuristic_nonempty <= 1 and len(transcript.strip()) > 350:
+        try_llm_refinement = True
 
     if (
         use_llm
         and (settings.openai_api_key or "").strip()
-        and len(keys) > 1
+        and len(questions) > 1
         and len(transcript.strip()) > 30
         and try_llm_refinement
     ):
         try:
-            llm_parts = await segment_transcript_llm(transcript, keys)
+            llm_parts = await segment_transcript_llm(transcript, questions)
             if llm_parts and sum(1 for v in llm_parts.values() if v.strip()) >= 2:
                 return llm_parts, []
         except Exception:

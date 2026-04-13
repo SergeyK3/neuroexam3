@@ -19,8 +19,7 @@ def test_build_result_row_matches_header_len():
         rationale="обоснование",
     )
     assert len(row) == len(sheets_client._RESULT_HEADER)
-    # Колонка «Ответ на билет»: ключ вопроса в начале текста ячейки
-    assert row[9].startswith("Ключ вопроса: Q1\n\nфрагмент")
+    assert row[9] == "фрагмент"
 
 
 def test_parse_registration_three_lines_legacy_no_group():

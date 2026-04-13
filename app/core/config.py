@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     mvp_reference_answer: str = "Укажите эталонный ответ для проверки в .env (MVP_REFERENCE_ANSWER)."
     mvp_references_json: str = ""
     mvp_segmentation_use_llm: bool = True
-    # Оценка: rubric (по полям, чат LLM) | similarity (семантика по эмбеддингам 0–1); нужен OPENAI_API_KEY
-    mvp_evaluation_mode: str = "rubric"
+    # Оценка: coverage (покрытие смысловых элементов, чат LLM) | similarity (семантика по эмбеддингам 0–1)
+    mvp_evaluation_mode: str = "coverage"
     mvp_evaluation_model: str = "gpt-4o-mini"
     mvp_embedding_model: str = "text-embedding-3-small"
 

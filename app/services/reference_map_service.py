@@ -1,17 +1,130 @@
-"""Словарь «ключ вопроса → эталон»: Google Sheets (приоритет) или fallback на .env."""
+"""Банк вопросов и эталонов: Google Sheets (приоритет) или fallback на .env."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import time
+
 from app.core.config import settings
-from app.integrations.sheets_client import fetch_ideal_references
+from app.integrations.sheets_client import fetch_ideal_references, fetch_question_bank
+from app.models.question_bank import QuestionRecord
 
 logger = logging.getLogger(__name__)
 
 _cache: dict[str, tuple[float, dict[str, str]]] = {}
+_bank_cache: dict[str, tuple[float, list[QuestionRecord]]] = {}
 _TTL_SEC = 120.0
+_STOPWORDS = {
+    "и",
+    "в",
+    "во",
+    "на",
+    "по",
+    "с",
+    "со",
+    "для",
+    "к",
+    "ко",
+    "это",
+    "как",
+    "что",
+    "его",
+    "ее",
+    "её",
+    "или",
+    "а",
+    "но",
+    "из",
+    "под",
+    "при",
+    "от",
+    "до",
+    "о",
+    "об",
+    "про",
+    "вопрос",
+    "ответ",
+    "ключ",
+    "вопроса",
+    "билет",
+    "номер",
+}
+
+
+def _cosine_similarity(a: list[float], b: list[float]) -> float:
+    if len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b, strict=True))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(y * y for y in b) ** 0.5
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return max(0.0, min(1.0, dot / (na * nb)))
+
+
+def normalize_question_key(key: str | None) -> str:
+    raw = (key or "").strip().lower()
+    if not raw:
+        return ""
+    nums = re.findall(r"\d+", raw)
+    if len(nums) >= 2:
+        return "-".join(nums)
+    raw = re.sub(r"[‐‑–—.,;/\\]+", "-", raw)
+    raw = re.sub(r"\s+", "-", raw)
+    raw = re.sub(r"-{2,}", "-", raw).strip("-")
+    return raw
+
+
+def _tokenize(text: str | None) -> set[str]:
+    return {
+        tok
+        for tok in re.findall(r"[a-zа-яё0-9]+", (text or "").lower())
+        if len(tok) > 2 and tok not in _STOPWORDS
+    }
+
+
+def _question_overlap_score(transcript_tokens: set[str], q: QuestionRecord) -> float:
+    q_tokens = _tokenize(q.question_text)
+    r_tokens = _tokenize(q.reference_answer)
+    if not transcript_tokens or not (q_tokens or r_tokens):
+        return 0.0
+    return 2.0 * len(transcript_tokens & q_tokens) + 1.0 * len(transcript_tokens & r_tokens)
+
+
+def _extract_explicit_keys(transcript: str | None) -> set[str]:
+    text = transcript or ""
+    hits: set[str] = set()
+    for m in re.finditer(
+        r"(?is)\b(?:ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?|по\s+(?:шифру|коду|ключу))\b\s*[:.;,]?\s*([0-9][0-9\s,./-]*)",
+        text,
+    ):
+        norm = normalize_question_key(m.group(1))
+        if norm:
+            hits.add(norm)
+    return hits
+
+
+def infer_expected_question_count(transcript: str | None) -> int:
+    text = (transcript or "").strip()
+    if not text:
+        return 1
+    count = 1
+    numeric = [int(n) for n in re.findall(r"(?i)\bвопрос\s*(?:номер\s*|№\s*)?(\d+)\b", text)]
+    if numeric:
+        count = max(count, max(numeric))
+    low = text.lower()
+    if "второй вопрос" in low:
+        count = max(count, 2)
+    if "третий вопрос" in low:
+        count = max(count, 3)
+    if "четвертый вопрос" in low or "четвёртый вопрос" in low:
+        count = max(count, 4)
+    key_mentions = len(re.findall(r"(?i)\b(?:ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?)\b", text))
+    if key_mentions:
+        count = max(count, min(key_mentions, 4))
+    return min(max(count, 1), 4)
 
 
 def spreadsheet_id_for_discipline(
@@ -62,6 +175,17 @@ def _sheet_id_for_session(
     return single or None
 
 
+def _env_question_bank() -> list[QuestionRecord]:
+    return [
+        QuestionRecord(
+            question_key=key,
+            question_text="",
+            reference_answer=ref,
+        )
+        for key, ref in settings.mvp_reference_map().items()
+    ]
+
+
 async def get_reference_map(
     discipline_id: str | None,
     registration_raw: str | None = None,
@@ -96,3 +220,134 @@ async def get_reference_map(
         logger.warning("Таблица %s: пусто, fallback на .env", sheet_id)
 
     return settings.mvp_reference_map()
+
+
+async def get_question_bank(
+    discipline_id: str | None,
+    registration_raw: str | None = None,
+) -> list[QuestionRecord]:
+    creds = settings.google_creds_path()
+    sheet_id = _sheet_id_for_session(discipline_id, registration_raw)
+    tab = settings.ideal_worksheet_for_discipline(discipline_id)
+
+    if creds and sheet_id:
+        cache_key = f"{sheet_id}|{tab}"
+        now = time.monotonic()
+        ent = _bank_cache.get(cache_key)
+        if ent is not None:
+            ts, data = ent
+            if now - ts < _TTL_SEC and data:
+                return list(data)
+
+        try:
+            data = await fetch_question_bank(sheet_id, tab, credentials_path=creds)
+        except Exception:
+            logger.exception("Не удалось прочитать банк вопросов Google Sheet %s", sheet_id)
+            logger.info("Fallback на эталоны из .env")
+            return _env_question_bank()
+
+        _bank_cache[cache_key] = (now, data)
+        if data:
+            return list(data)
+        logger.warning("Таблица %s: пусто, fallback на .env", sheet_id)
+
+    return _env_question_bank()
+
+
+def select_relevant_questions(
+    transcript: str,
+    bank: list[QuestionRecord],
+    *,
+    limit: int | None = None,
+) -> list[QuestionRecord]:
+    if not bank:
+        return []
+    take = limit if limit is not None else infer_expected_question_count(transcript)
+    take = min(max(take, 1), len(bank))
+    t_tokens = _tokenize(transcript)
+    explicit_keys = _extract_explicit_keys(transcript)
+    ranked = sorted(
+        bank,
+        key=lambda q: (
+            (_question_overlap_score(t_tokens, q) + (6.0 if normalize_question_key(q.question_key) in explicit_keys else 0.0)),
+            len(q.question_text),
+            len(q.reference_answer),
+        ),
+        reverse=True,
+    )
+    return ranked[:take]
+
+
+async def select_relevant_questions_async(
+    transcript: str,
+    bank: list[QuestionRecord],
+    *,
+    limit: int | None = None,
+) -> list[QuestionRecord]:
+    if not bank:
+        return []
+    take = limit if limit is not None else infer_expected_question_count(transcript)
+    take = min(max(take, 1), len(bank))
+    lexical_shortlist = select_relevant_questions(transcript, bank, limit=min(max(take * 4, 8), len(bank)))
+    if not (settings.openai_api_key or "").strip() or len(lexical_shortlist) <= take:
+        return lexical_shortlist[:take]
+    try:
+        from openai import AsyncOpenAI
+    except ImportError:
+        return lexical_shortlist[:take]
+
+    explicit_keys = _extract_explicit_keys(transcript)
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    model = (settings.mvp_embedding_model or "text-embedding-3-small").strip() or "text-embedding-3-small"
+    payload = [transcript.strip()] + [
+        f"{q.question_text}\n{q.reference_answer[:700]}".strip() for q in lexical_shortlist
+    ]
+    try:
+        resp = await client.embeddings.create(model=model, input=payload)
+    except Exception:
+        logger.exception("Question selection embeddings failed")
+        return lexical_shortlist[:take]
+
+    vectors = [list(item.embedding) for item in resp.data]
+    if len(vectors) != len(payload):
+        return lexical_shortlist[:take]
+    t_vec = vectors[0]
+    scored = [
+        (
+            q,
+            _cosine_similarity(t_vec, vec),
+            normalize_question_key(q.question_key) in explicit_keys,
+        )
+        for q, vec in zip(lexical_shortlist, vectors[1:], strict=True)
+    ]
+    scored.sort(
+        key=lambda item: (
+            item[1] + (0.2 if item[2] else 0.0),
+            len(item[0].question_text),
+        ),
+        reverse=True,
+    )
+    best_sim = scored[0][1] if scored else 0.0
+    selected: list[QuestionRecord] = []
+    seen: set[str] = set()
+    for q, sim, is_explicit in scored:
+        if not is_explicit:
+            continue
+        # Явный ключ оставляем только если он не противоречит смыслу самого ответа.
+        if sim + 0.08 < best_sim:
+            continue
+        nk = normalize_question_key(q.question_key)
+        if nk not in seen:
+            selected.append(q)
+            seen.add(nk)
+        if len(selected) >= take:
+            return selected[:take]
+    for q, _sim, _is_explicit in scored:
+        nk = normalize_question_key(q.question_key)
+        if nk in seen:
+            continue
+        selected.append(q)
+        seen.add(nk)
+        if len(selected) >= take:
+            break
+    return selected[:take]

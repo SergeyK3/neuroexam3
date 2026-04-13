@@ -4,6 +4,7 @@ from app.services.exam_text_parsing import (
     extract_answer_body_for_evaluation,
     extract_ticket_number,
     split_at_otvet_marker,
+    strip_embedded_bot_output,
     strip_answer_completion_markers,
 )
 
@@ -75,3 +76,21 @@ def test_extract_answer_shifr_in_instruction_head():
     out = extract_answer_body_for_evaluation(raw)
     assert "Электронные медицинские карты" in out
     assert "Билет 2" not in out
+
+
+def test_strip_embedded_bot_output_from_rubric_tail():
+    raw = (
+        "Билет 2. Ключ 2-7-2. Ответ про диагностику.\n"
+        "• Вопрос 1 Обоснование: — Полнота: ...\n"
+        "Среднее по рубрике (итого): (40) / 1 = 40.0"
+    )
+    out = strip_embedded_bot_output(raw)
+    assert "Ответ про диагностику" in out
+    assert "Обоснование" not in out
+    assert "Среднее по рубрике" not in out
+
+
+def test_strip_embedded_bot_output_from_error_tail():
+    raw = "Ключ вопроса: 1-2-1 Ответ студента. Ошибка Бот не смог разделить ответ."
+    out = strip_embedded_bot_output(raw)
+    assert out == "Ключ вопроса: 1-2-1 Ответ студента."

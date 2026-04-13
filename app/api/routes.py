@@ -6,7 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
 from app.services import evaluation_service, speech_service
-from app.services.exam_text_parsing import strip_answer_completion_markers
+from app.services.exam_text_parsing import strip_answer_completion_markers, strip_embedded_bot_output
 
 logger = logging.getLogger(__name__)
 
@@ -19,32 +19,29 @@ async def evaluate_voice(
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
     language: Annotated[str, Form(description="BCP-47 language code")] = "ru",
 ):
-    """Распознавание речи и оценка: рубрика (JSON) или семантическое сходство 0–1 по эмбеддингам (нужен OPENAI_API_KEY)."""
+    """Распознавание речи и оценка: покрытие смысловых элементов или семантическое сходство 0–1."""
     audio_bytes = await audio.read()
-    transcript = strip_answer_completion_markers(
+    transcript = strip_embedded_bot_output(strip_answer_completion_markers(
         (await speech_service.transcribe(audio_bytes, language=language)).strip(),
-    )
+    ))
     if not transcript:
         raise HTTPException(
             status_code=400,
             detail="После удаления служебных фраз о конце ответа не осталось текста для оценки.",
         )
 
-    if evaluation_service.use_rubric_scoring():
-        r = await evaluation_service.evaluate_rubric(transcript, reference)
+    if evaluation_service.use_coverage_scoring():
+        r = await evaluation_service.evaluate_coverage(transcript, reference)
         return {
-            "mode": "rubric",
+            "mode": "coverage",
             "transcript": transcript,
             "reference": reference,
-            "content_score": r.content_score,
-            "accuracy_score": r.accuracy_score,
-            "structure_score": r.structure_score,
-            "conciseness_score": r.conciseness_score,
-            "total": r.total,
-            "content_rationale": r.content_rationale,
-            "accuracy_rationale": r.accuracy_rationale,
-            "structure_rationale": r.structure_rationale,
-            "conciseness_rationale": r.conciseness_rationale,
+            "score": r.score,
+            "total_elements": r.total_elements,
+            "covered_elements": r.covered_elements,
+            "partial_elements": r.partial_elements,
+            "missing_elements": r.missing_elements,
+            "general_comment": r.general_comment,
         }
 
     score = await evaluation_service.evaluate_similarity(transcript, reference)
@@ -61,28 +58,25 @@ async def evaluate_text(
     student_answer: Annotated[str, Form(description="Student answer as plain text")],
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
 ):
-    """Текстовый ответ: рубрика или семантическое сходство по эмбеддингам — как у голоса."""
-    student_answer = strip_answer_completion_markers(student_answer.strip())
+    """Текстовый ответ: покрытие смысловых элементов или семантическое сходство по эмбеддингам."""
+    student_answer = strip_embedded_bot_output(strip_answer_completion_markers(student_answer.strip()))
     if not student_answer:
         raise HTTPException(
             status_code=400,
             detail="После удаления служебных фраз о конце ответа не осталось текста для оценки.",
         )
-    if evaluation_service.use_rubric_scoring():
-        r = await evaluation_service.evaluate_rubric(student_answer, reference)
+    if evaluation_service.use_coverage_scoring():
+        r = await evaluation_service.evaluate_coverage(student_answer, reference)
         return {
-            "mode": "rubric",
+            "mode": "coverage",
             "student_answer": student_answer,
             "reference": reference,
-            "content_score": r.content_score,
-            "accuracy_score": r.accuracy_score,
-            "structure_score": r.structure_score,
-            "conciseness_score": r.conciseness_score,
-            "total": r.total,
-            "content_rationale": r.content_rationale,
-            "accuracy_rationale": r.accuracy_rationale,
-            "structure_rationale": r.structure_rationale,
-            "conciseness_rationale": r.conciseness_rationale,
+            "score": r.score,
+            "total_elements": r.total_elements,
+            "covered_elements": r.covered_elements,
+            "partial_elements": r.partial_elements,
+            "missing_elements": r.missing_elements,
+            "general_comment": r.general_comment,
         }
 
     score = await evaluation_service.evaluate_similarity(student_answer, reference)

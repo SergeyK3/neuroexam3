@@ -1,4 +1,4 @@
-"""Чтение эталонов с листа Google Sheets (сервисный аккаунт)."""
+"""Чтение банка вопросов и эталонов с листа Google Sheets."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ import re
 import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from app.models.question_bank import QuestionRecord
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,15 @@ _REF_HEADER = frozenset(
         "полный ответ",
         "текст ответа",
         "правильный ответ",
+    },
+)
+_QUESTION_HEADER = frozenset(
+    {
+        "question",
+        "вопрос",
+        "формулировка вопроса",
+        "текст вопроса",
+        "question_text",
     },
 )
 
@@ -109,7 +120,56 @@ def _is_placeholder_key_cell(k: str) -> bool:
     return _normalize_header(k) in _PLACEHOLDER_KEY_CELLS
 
 
+def _pick_col(headers: list[str], aliases: frozenset[str], default: int | None = None) -> int | None:
+    idx = _find_col(headers, aliases)
+    if idx is not None:
+        return idx
+    return default if default is not None and default < len(headers) else None
+
+
+def _parse_question_bank(rows: list[list[Any]]) -> list[QuestionRecord]:
+    if not rows:
+        return []
+    headers = [_normalize_header(str(c or "")) for c in rows[0]]
+
+    idx_k = _pick_col(headers, _KEY_HEADER, default=0)
+    idx_q = _pick_col(headers, _QUESTION_HEADER, default=1)
+    idx_r = _pick_col(headers, _REF_HEADER, default=2)
+
+    if idx_k is None or idx_q is None or idx_r is None:
+        return []
+
+    has_header = (
+        _find_col(headers, _KEY_HEADER) is not None
+        or _find_col(headers, _QUESTION_HEADER) is not None
+        or _find_col(headers, _REF_HEADER) is not None
+    )
+    data_rows = rows[1:] if has_header else rows
+
+    out: list[QuestionRecord] = []
+    for row in data_rows:
+        if len(row) <= max(idx_k, idx_q, idx_r):
+            continue
+        k = str(row[idx_k] or "").strip()
+        q = str(row[idx_q] or "").strip()
+        r = str(row[idx_r] or "").strip()
+        if not k or not r or _is_placeholder_key_cell(k):
+            continue
+        out.append(
+            QuestionRecord(
+                question_key=k,
+                question_text=q,
+                reference_answer=r,
+            ),
+        )
+    return out
+
+
 def _parse_table(rows: list[list[Any]]) -> dict[str, str]:
+    bank = _parse_question_bank(rows)
+    if bank:
+        return {q.question_key: q.reference_answer for q in bank}
+
     if not rows:
         return {}
     headers = [_normalize_header(str(c or "")) for c in rows[0]]
@@ -133,9 +193,7 @@ def _parse_table(rows: list[list[Any]]) -> dict[str, str]:
             continue
         k = str(row[idx_k] or "").strip()
         v = str(row[idx_r] or "").strip()
-        if not k or not v:
-            continue
-        if _is_placeholder_key_cell(k):
+        if not k or not v or _is_placeholder_key_cell(k):
             continue
         out[k] = v
     return out
@@ -176,6 +234,46 @@ async def fetch_ideal_references(
 ) -> dict[str, str]:
     return await asyncio.to_thread(
         fetch_ideal_references_sync,
+        spreadsheet_id,
+        worksheet_title,
+        credentials_path=credentials_path,
+    )
+
+
+def fetch_question_bank_sync(
+    spreadsheet_id: str,
+    worksheet_title: str,
+    *,
+    credentials_path: str,
+) -> list[QuestionRecord]:
+    from app.integrations import google_sheets
+
+    cred_path = _resolve_credentials_path(credentials_path)
+    if not cred_path:
+        raise RuntimeError(
+            "Не задан путь к JSON сервисного аккаунта: "
+            "GOOGLE_SHEETS_CREDENTIALS или GOOGLE_APPLICATION_CREDENTIALS",
+        )
+    if not os.path.isfile(cred_path):
+        raise FileNotFoundError(f"Файл ключа не найден: {cred_path}")
+
+    ws = google_sheets.get_worksheet(
+        spreadsheet_id,
+        worksheet_title,
+        credentials_path=credentials_path,
+    )
+    rows = ws.get_all_values()
+    return _parse_question_bank(rows)
+
+
+async def fetch_question_bank(
+    spreadsheet_id: str,
+    worksheet_title: str,
+    *,
+    credentials_path: str,
+) -> list[QuestionRecord]:
+    return await asyncio.to_thread(
+        fetch_question_bank_sync,
         spreadsheet_id,
         worksheet_title,
         credentials_path=credentials_path,
@@ -285,17 +383,12 @@ def build_result_row(
 ) -> list[Any]:
     """
     Одна строка листа students_answers. Оценка — балл 0–100 или сходство 0–1 как строка.
-    Колонка «Ответ на билет» — фрагмент по данному ключу (с явной строкой «Ключ вопроса: …» в начале);
-    при пустом фрагменте — обрезанный полный транскрипт с тем же префиксом ключа.
+    Колонка «Ответ на билет» — фрагмент по данному ключу;
+    при пустом фрагменте — обрезанный полный транскрипт.
     """
     ts = _answer_started_at_almaty_display()
     body = (answer_excerpt or "").strip() or (full_transcript or "").strip()
-    qk = (question_key or "").strip()
-    if qk:
-        answer_cell = f"Ключ вопроса: {qk}\n\n{body}".strip()
-    else:
-        answer_cell = body
-    answer_cell = _clip(answer_cell, 8000)
+    answer_cell = _clip(body, 8000)
     comment = _clip(
         "\n".join(
             p

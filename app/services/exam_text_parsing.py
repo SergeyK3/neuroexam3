@@ -36,6 +36,12 @@ _COMPLETION_PHRASES = (
 _COMPLETION_RE = re.compile(
     r"(?iu)(?<!\w)(?:" + "|".join(_COMPLETION_PHRASES) + r")(?!\w)\s*[\.,!?;:…]*",
 )
+_LEGACY_BOT_OUTPUT_START_RE = re.compile(
+    r"(?is)(?:^|\n|\s)(?:•\s*)?Вопрос\s+1\b.*",
+)
+_LEGACY_BOT_TAIL_RE = re.compile(
+    r"(?is)\b(?:ошибк[аи]|примечани[ея])\b.*",
+)
 
 
 _TICKET_PATTERNS = (
@@ -117,5 +123,23 @@ def strip_answer_completion_markers(text: str | None) -> str:
         prev = t
         t = _COMPLETION_RE.sub(" ", t)
     t = re.sub(r"[ \t]+", " ", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def strip_embedded_bot_output(text: str | None) -> str:
+    """
+    Убрать хвосты, которые попали в транскрипт из старого вывода бота:
+    «• Вопрос 1 Обоснование ...», «Среднее по рубрике ...», «Ошибка ...».
+    """
+    if not text or not str(text).strip():
+        return ""
+    t = unicodedata.normalize("NFC", str(text)).strip()
+    m = _LEGACY_BOT_OUTPUT_START_RE.search(t)
+    if m:
+        t = t[: m.start()].strip()
+    m2 = _LEGACY_BOT_TAIL_RE.search(t)
+    if m2:
+        t = t[: m2.start()].strip()
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()
