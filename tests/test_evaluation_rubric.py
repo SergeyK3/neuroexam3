@@ -12,6 +12,7 @@ from app.services.evaluation_service import (
     cosine_similarity_vec,
     evaluate_coverage,
     evaluate_similarity,
+    use_coverage_scoring,
 )
 
 
@@ -77,6 +78,12 @@ async def test_evaluate_similarity_requires_key(monkeypatch):
     monkeypatch.setattr(settings, "openai_api_key", "", raising=False)
     with pytest.raises(ValueError, match="OPENAI_API_KEY"):
         await evaluate_similarity("a", "b")
+
+
+def test_use_coverage_scoring_accepts_rubric_alias(monkeypatch):
+    monkeypatch.setattr(settings, "openai_api_key", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "mvp_evaluation_mode", "rubric", raising=False)
+    assert use_coverage_scoring()
 
 
 @pytest.mark.asyncio

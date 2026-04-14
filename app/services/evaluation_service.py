@@ -14,10 +14,17 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def normalized_evaluation_mode() -> str:
+    """Нормализует режим оценки, сохраняя обратную совместимость старых значений .env."""
+    mode = (settings.mvp_evaluation_mode or "coverage").strip().lower()
+    if mode in {"coverage", "rubric"}:
+        return "coverage"
+    return "similarity"
+
+
 def use_coverage_scoring() -> bool:
     """Покрытие смысловых элементов включается режимом и наличием ключа OpenAI."""
-    mode = (settings.mvp_evaluation_mode or "coverage").strip().lower()
-    return mode == "coverage" and bool((settings.openai_api_key or "").strip())
+    return normalized_evaluation_mode() == "coverage" and bool((settings.openai_api_key or "").strip())
 
 
 def cosine_similarity_vec(a: list[float], b: list[float]) -> float:
