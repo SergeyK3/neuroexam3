@@ -56,7 +56,25 @@ def test_parse_ideal_table_placeholder_row_skipped_in_fallback_mode():
     assert m.get("5-5-5") == "Нормальный эталон"
 
 
-def test_select_relevant_questions_returns_empty_without_signal():
+def test_select_relevant_questions_matches_concat_digit_key():
+    """STT пишет «ключ 114», а банк содержит ключ «1-1-4» — должен найти через digits-only."""
+    bank = [
+        QuestionRecord(question_key="1-1-4", question_text="Передача сигнала", reference_answer="Нейрон"),
+        QuestionRecord(question_key="2-1-4", question_text="Модели обучения", reference_answer="Перцептрон"),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Ключ 114. Ответ про нейроны. Ключ 214. Ответ про модели.",
+        bank,
+        limit=2,
+    )
+
+    keys = {q.question_key for q in selected}
+    assert "1-1-4" in keys
+    assert "2-1-4" in keys
+
+
+def test_select_relevant_questions_falls_back_to_top_ranked():
     bank = [
         QuestionRecord(question_key="1-1-1", question_text="Безопасность данных пациентов", reference_answer="Шифрование и аудит"),
         QuestionRecord(question_key="2-2-2", question_text="Электронные медицинские карты", reference_answer="МИС и ЭМК"),
@@ -68,7 +86,7 @@ def test_select_relevant_questions_returns_empty_without_signal():
         limit=1,
     )
 
-    assert selected == []
+    assert len(selected) == 1
 
 @pytest.mark.asyncio
 async def test_get_reference_map_uses_env_when_no_sheets(monkeypatch):
@@ -147,7 +165,8 @@ async def test_get_reference_map_prefers_course_name_map(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_select_relevant_questions_async_keeps_explicit_key(monkeypatch):
+async def test_select_relevant_questions_async_trusts_explicit_key(monkeypatch):
+    """Если студент явно назвал ключ, он должен быть включён даже при слабой семантике."""
     monkeypatch.setattr(cfg.settings, "openai_api_key", "sk-test", raising=False)
     bank = [
         QuestionRecord(question_key="1-1-1", question_text="Тема А", reference_answer="A"),
@@ -160,7 +179,6 @@ async def test_select_relevant_questions_async_keeps_explicit_key(monkeypatch):
         return item
 
     resp = MagicMock()
-    # Payload order: transcript, then lexical shortlist where explicit key 2-2-2 идет первым.
     resp.data = [emb([1.0, 0.0]), emb([0.0, 1.0]), emb([1.0, 0.0])]
     mock_client = MagicMock()
     mock_client.embeddings.create = AsyncMock(return_value=resp)
@@ -176,8 +194,45 @@ async def test_select_relevant_questions_async_keeps_explicit_key(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_select_relevant_questions_async_returns_empty_without_signal(monkeypatch):
+async def test_select_relevant_questions_async_both_explicit_keys_selected(monkeypatch):
+    """Два явных ключа из транскрипта попадают в результат, даже если
+    один из них семантически далёк от общего эмбеддинга."""
     monkeypatch.setattr(cfg.settings, "openai_api_key", "sk-test", raising=False)
+    bank = [
+        QuestionRecord(question_key="1-1-4", question_text="Передача сигнала", reference_answer="Нейроны"),
+        QuestionRecord(question_key="1-2-4", question_text="Подходы к ИИ", reference_answer="Машинное обучение"),
+        QuestionRecord(question_key="9-9-9", question_text="Не тот", reference_answer="Другой"),
+    ]
+
+    def emb(vec: list[float]):
+        item = MagicMock()
+        item.embedding = vec
+        return item
+
+    resp = MagicMock()
+    resp.data = [
+        emb([0.9, 0.1, 0.0]),   # transcript — ближе к 1-1-4
+        emb([1.0, 0.0, 0.0]),   # 1-1-4
+        emb([0.0, 1.0, 0.0]),   # 1-2-4 — далеко от транскрипта
+        emb([0.0, 0.0, 1.0]),   # 9-9-9
+    ]
+    mock_client = MagicMock()
+    mock_client.embeddings.create = AsyncMock(return_value=resp)
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **kwargs: mock_client)
+
+    selected = await reference_map_service.select_relevant_questions_async(
+        "Ключ 114. Ответ про нейроны. Ключ номер 1, 2, 4. Ответ про ИИ.",
+        bank,
+        limit=2,
+    )
+
+    keys = {q.question_key for q in selected}
+    assert keys == {"1-1-4", "1-2-4"}
+
+
+@pytest.mark.asyncio
+async def test_select_relevant_questions_async_falls_back_without_signal(monkeypatch):
+    monkeypatch.setattr(cfg.settings, "openai_api_key", "", raising=False)
     bank = [
         QuestionRecord(question_key="1-1-1", question_text="Безопасность данных пациентов", reference_answer="Шифрование и аудит"),
         QuestionRecord(question_key="2-2-2", question_text="Электронные медицинские карты", reference_answer="МИС и ЭМК"),
@@ -189,4 +244,4 @@ async def test_select_relevant_questions_async_returns_empty_without_signal(monk
         limit=1,
     )
 
-    assert selected == []
+    assert len(selected) == 1

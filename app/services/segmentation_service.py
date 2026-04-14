@@ -48,6 +48,40 @@ def _typo_correct_digit_triple_tokens(transcript: str, keys: list[str]) -> str:
     return re.sub(r"\d+(?:\s*[‑–—\-.,/]\s*\d+){2}", repl, transcript)
 
 
+def _expand_stt_concat_keys(text: str, canon_keys: list[str]) -> str:
+    """
+    STT часто пишет «ключ 114» вместо «ключ 1-1-4».
+    Подменяем слитные/пробельные цифры после «ключ/шифр/код» на канонический ключ,
+    если цифровое содержание совпадает с одним из ключей банка.
+    """
+    digit_map: dict[str, str] = {}
+    for ck in canon_keys:
+        d = re.sub(r"\D", "", ck)
+        if d and d != ck and len(d) >= 2:
+            digit_map[d] = ck
+    if not digit_map:
+        return text
+
+    _intro = (
+        r"(?:ключ(?:\s*вопроса)?(?:\s+номер)?|шифр(?:\s*вопроса)?(?:\s+номер)?|"
+        r"код(?:\s*вопроса)?(?:\s+номер)?|номер\s*(?:вопроса|ключа)?|обозначение|"
+        r"по\s+(?:шифру|коду|ключу)|вопрос\s+с\s+(?:кодом|шифром|ключом))"
+    )
+
+    def repl(m: re.Match[str]) -> str:
+        prefix = m.group(1)
+        raw_num = m.group(2)
+        digits = re.sub(r"\D", "", raw_num)
+        canon = digit_map.get(digits)
+        return prefix + canon if canon else m.group(0)
+
+    return re.sub(
+        rf"(?i)({_intro}\s*[:.;,]?\s*)(\d+(?:\s+\d+)*)\b",
+        repl,
+        text,
+    )
+
+
 def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
     """
     Блоки «КЛЮЧ: тело» / «КЛЮЧ — тело» / «КЛЮЧ. тело» по всему тексту.
@@ -58,16 +92,17 @@ def _try_key_headers(transcript: str, keys: list[str]) -> dict[str, str] | None:
     t = unicodedata.normalize("NFC", (transcript or "").strip())
     t = _unify_hyphens(t)
     t = _typo_correct_digit_triple_tokens(t, keys)
-    # Длинные ключи первыми, чтобы «1-5-10» не резалось как «1-5-1» + «0…»
     norm_keys = [_canon_key(k) for k in keys]
+    t = _expand_stt_concat_keys(t, norm_keys)
+    # Длинные ключи первыми, чтобы «1-5-10» не резалось как «1-5-1» + «0…»
     pattern = "|".join(sorted((re.escape(k) for k in norm_keys), key=len, reverse=True))
     # Устные вводные перед шифром из бланка: не только «ключ …», но и «ключ вопроса …»,
     # «шифр», «код вопроса», «по шифру …» и т.д. (STT и привычки экзаменуемых различаются).
     _key_speech_intro = (
         r"(?:"
-        r"ключ(?:\s*вопроса)?|"
-        r"шифр(?:\s*вопроса)?|"
-        r"код(?:\s*вопроса)?|"
+        r"ключ(?:\s*вопроса)?(?:\s+номер)?|"
+        r"шифр(?:\s*вопроса)?(?:\s+номер)?|"
+        r"код(?:\s*вопроса)?(?:\s+номер)?|"
         r"номер\s*(?:вопроса|ключа)?|"
         r"обозначение|"
         r"по\s+(?:шифру|коду|ключу)|"

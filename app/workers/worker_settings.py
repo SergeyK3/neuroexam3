@@ -30,3 +30,4 @@ def _redis() -> RedisSettings:
 class WorkerSettings:
     functions = [process_telegram_update]
     redis_settings = _redis()
+    max_jobs = 1

@@ -159,6 +159,10 @@ async def _candidate_questions_for_transcript(
     bank: list[QuestionRecord],
 ) -> list[QuestionRecord]:
     take = reference_map_service.infer_expected_question_count(transcript)
+    logger.info(
+        "infer_expected_question_count=%d bank_size=%d",
+        take, len(bank),
+    )
     if len(bank) <= take:
         return list(bank)
     return await reference_map_service.select_relevant_questions_async(transcript, bank, limit=take)
@@ -298,6 +302,12 @@ async def _evaluate_and_reply(
         return
 
     questions = await _candidate_questions_for_transcript(transcript, bank)
+    logger.info(
+        "Кандидатные вопросы (%d): %s | транскрипт (%.120s…)",
+        len(questions),
+        [q.question_key for q in questions],
+        transcript,
+    )
     if not questions:
         await telegram_client.send_message(chat_id, "Не удалось подобрать вопросы для оценки по текущему ответу.")
         return
@@ -308,6 +318,11 @@ async def _evaluate_and_reply(
         use_llm=settings.mvp_segmentation_use_llm,
     )
     parts = _repair_segments(transcript, questions, parts)
+    logger.info(
+        "Сегментация: ключи=%s непустых=%d",
+        list(parts.keys()),
+        sum(1 for v in parts.values() if (v or "").strip()),
+    )
 
     has_openai = bool((settings.openai_api_key or "").strip())
     if not has_openai:
@@ -507,6 +522,12 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
     sess = await session_service.get_session(user_id)
     if sess is None:
         sess = ExamSession(user_id=user_id)
+        logger.info("Новая сессия (не было в памяти): user_id=%s state=%s", user_id, sess.state.value)
+    else:
+        logger.info(
+            "Сессия из памяти: user_id=%s state=%s text=%.60r",
+            user_id, sess.state.value, text,
+        )
 
     if session_service.is_timed_out(sess) and sess.state != ExamState.FINISH:
         await telegram_client.send_message(
@@ -527,6 +548,13 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
         text=text,
         has_voice=has_voice,
         is_start_command=False,
+    )
+    logger.info(
+        "FSM → state=%s msgs=%d evaluate=%s user_id=%s",
+        out.session.state.value,
+        len(out.messages),
+        bool(out.evaluate_text),
+        user_id,
     )
 
     for line in out.messages:

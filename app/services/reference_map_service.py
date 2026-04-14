@@ -77,6 +77,19 @@ def normalize_question_key(key: str | None) -> str:
     return raw
 
 
+def _digits_of(key: str) -> str:
+    """Только цифры ключа: для сопоставления «114» ↔ «1-1-4» (STT склеивает цифры)."""
+    return re.sub(r"\D", "", key)
+
+
+def _is_explicit_match(normalized_bank_key: str, explicit_keys: set[str]) -> bool:
+    """Точное или digits-only совпадение (STT часто склеивает цифры ключа без разделителей)."""
+    if normalized_bank_key in explicit_keys:
+        return True
+    d = _digits_of(normalized_bank_key)
+    return bool(d) and len(d) >= 2 and any(_digits_of(ek) == d for ek in explicit_keys)
+
+
 def _tokenize(text: str | None) -> set[str]:
     return {
         tok
@@ -103,7 +116,7 @@ def _rank_questions_by_signal(
         (
             q,
             _question_overlap_score(t_tokens, q),
-            normalize_question_key(q.question_key) in explicit_keys,
+            _is_explicit_match(normalize_question_key(q.question_key), explicit_keys),
         )
         for q in bank
     ]
@@ -122,7 +135,7 @@ def _extract_explicit_keys(transcript: str | None) -> set[str]:
     text = transcript or ""
     hits: set[str] = set()
     for m in re.finditer(
-        r"(?is)\b(?:ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?|по\s+(?:шифру|коду|ключу))\b\s*[:.;,]?\s*([0-9][0-9\s,./-]*)",
+        r"(?is)\b(?:ключ(?:\s*вопроса)?(?:\s+номер)?|шифр(?:\s+номер)?|код(?:\s*вопроса)?(?:\s+номер)?|по\s+(?:шифру|коду|ключу))\b\s*[:.;,]?\s*([0-9][0-9\s,./-]*)",
         text,
     ):
         norm = normalize_question_key(m.group(1))
@@ -290,8 +303,6 @@ def select_relevant_questions(
     take = limit if limit is not None else infer_expected_question_count(transcript)
     take = min(max(take, 1), len(bank))
     ranked = _rank_questions_by_signal(transcript, bank)
-    if not any(score > 0.0 or is_explicit for _q, score, is_explicit in ranked):
-        return []
     return [q for q, _score, _is_explicit in ranked[:take]]
 
 
@@ -306,8 +317,6 @@ async def select_relevant_questions_async(
     take = limit if limit is not None else infer_expected_question_count(transcript)
     take = min(max(take, 1), len(bank))
     lexical_ranked = _rank_questions_by_signal(transcript, bank)
-    if not any(score > 0.0 or is_explicit for _q, score, is_explicit in lexical_ranked):
-        return []
     lexical_shortlist = [q for q, _score, _is_explicit in lexical_ranked[: min(max(take * 4, 8), len(bank))]]
     if not (settings.openai_api_key or "").strip() or len(lexical_shortlist) <= take:
         return lexical_shortlist[:take]
@@ -336,7 +345,7 @@ async def select_relevant_questions_async(
         (
             q,
             _cosine_similarity(t_vec, vec),
-            normalize_question_key(q.question_key) in explicit_keys,
+            _is_explicit_match(normalize_question_key(q.question_key), explicit_keys),
         )
         for q, vec in zip(lexical_shortlist, vectors[1:], strict=True)
     ]
@@ -350,10 +359,10 @@ async def select_relevant_questions_async(
     best_sim = scored[0][1] if scored else 0.0
     selected: list[QuestionRecord] = []
     seen: set[str] = set()
-    for q in lexical_shortlist:
-        nk = normalize_question_key(q.question_key)
-        if nk not in explicit_keys:
+    for q, sim, is_explicit in scored:
+        if not is_explicit:
             continue
+        nk = normalize_question_key(q.question_key)
         if nk not in seen:
             selected.append(q)
             seen.add(nk)
