@@ -1,5 +1,7 @@
 """Тесты загрузки эталонов (mock Google)."""
 
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
 from app.core import config as cfg
@@ -52,6 +54,21 @@ def test_parse_ideal_table_placeholder_row_skipped_in_fallback_mode():
     m = _parse_table(rows)
     assert "Ключ" not in m
     assert m.get("5-5-5") == "Нормальный эталон"
+
+
+def test_select_relevant_questions_returns_empty_without_signal():
+    bank = [
+        QuestionRecord(question_key="1-1-1", question_text="Безопасность данных пациентов", reference_answer="Шифрование и аудит"),
+        QuestionRecord(question_key="2-2-2", question_text="Электронные медицинские карты", reference_answer="МИС и ЭМК"),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Совершенно другой текст без совпадающих терминов.",
+        bank,
+        limit=1,
+    )
+
+    assert selected == []
 
 @pytest.mark.asyncio
 async def test_get_reference_map_uses_env_when_no_sheets(monkeypatch):
@@ -127,3 +144,49 @@ async def test_get_reference_map_prefers_course_name_map(monkeypatch):
     )
     assert m == {"Q1": "from_named_sheet"}
     assert seen == [("sheet-from-name", "ideal_answers")]
+
+
+@pytest.mark.asyncio
+async def test_select_relevant_questions_async_keeps_explicit_key(monkeypatch):
+    monkeypatch.setattr(cfg.settings, "openai_api_key", "sk-test", raising=False)
+    bank = [
+        QuestionRecord(question_key="1-1-1", question_text="Тема А", reference_answer="A"),
+        QuestionRecord(question_key="2-2-2", question_text="Тема Б", reference_answer="B"),
+    ]
+
+    def emb(vec: list[float]):
+        item = MagicMock()
+        item.embedding = vec
+        return item
+
+    resp = MagicMock()
+    # Payload order: transcript, then lexical shortlist where explicit key 2-2-2 идет первым.
+    resp.data = [emb([1.0, 0.0]), emb([0.0, 1.0]), emb([1.0, 0.0])]
+    mock_client = MagicMock()
+    mock_client.embeddings.create = AsyncMock(return_value=resp)
+    monkeypatch.setattr("openai.AsyncOpenAI", lambda **kwargs: mock_client)
+
+    selected = await reference_map_service.select_relevant_questions_async(
+        "Ключ вопроса 2-2-2. Краткий ответ.",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["2-2-2"]
+
+
+@pytest.mark.asyncio
+async def test_select_relevant_questions_async_returns_empty_without_signal(monkeypatch):
+    monkeypatch.setattr(cfg.settings, "openai_api_key", "sk-test", raising=False)
+    bank = [
+        QuestionRecord(question_key="1-1-1", question_text="Безопасность данных пациентов", reference_answer="Шифрование и аудит"),
+        QuestionRecord(question_key="2-2-2", question_text="Электронные медицинские карты", reference_answer="МИС и ЭМК"),
+    ]
+
+    selected = await reference_map_service.select_relevant_questions_async(
+        "Совершенно другой текст без совпадающих терминов.",
+        bank,
+        limit=1,
+    )
+
+    assert selected == []

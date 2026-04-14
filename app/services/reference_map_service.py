@@ -93,6 +93,31 @@ def _question_overlap_score(transcript_tokens: set[str], q: QuestionRecord) -> f
     return 2.0 * len(transcript_tokens & q_tokens) + 1.0 * len(transcript_tokens & r_tokens)
 
 
+def _rank_questions_by_signal(
+    transcript: str,
+    bank: list[QuestionRecord],
+) -> list[tuple[QuestionRecord, float, bool]]:
+    t_tokens = _tokenize(transcript)
+    explicit_keys = _extract_explicit_keys(transcript)
+    ranked = [
+        (
+            q,
+            _question_overlap_score(t_tokens, q),
+            normalize_question_key(q.question_key) in explicit_keys,
+        )
+        for q in bank
+    ]
+    ranked.sort(
+        key=lambda item: (
+            item[1] + (6.0 if item[2] else 0.0),
+            len(item[0].question_text),
+            len(item[0].reference_answer),
+        ),
+        reverse=True,
+    )
+    return ranked
+
+
 def _extract_explicit_keys(transcript: str | None) -> set[str]:
     text = transcript or ""
     hits: set[str] = set()
@@ -264,18 +289,10 @@ def select_relevant_questions(
         return []
     take = limit if limit is not None else infer_expected_question_count(transcript)
     take = min(max(take, 1), len(bank))
-    t_tokens = _tokenize(transcript)
-    explicit_keys = _extract_explicit_keys(transcript)
-    ranked = sorted(
-        bank,
-        key=lambda q: (
-            (_question_overlap_score(t_tokens, q) + (6.0 if normalize_question_key(q.question_key) in explicit_keys else 0.0)),
-            len(q.question_text),
-            len(q.reference_answer),
-        ),
-        reverse=True,
-    )
-    return ranked[:take]
+    ranked = _rank_questions_by_signal(transcript, bank)
+    if not any(score > 0.0 or is_explicit for _q, score, is_explicit in ranked):
+        return []
+    return [q for q, _score, _is_explicit in ranked[:take]]
 
 
 async def select_relevant_questions_async(
@@ -288,7 +305,10 @@ async def select_relevant_questions_async(
         return []
     take = limit if limit is not None else infer_expected_question_count(transcript)
     take = min(max(take, 1), len(bank))
-    lexical_shortlist = select_relevant_questions(transcript, bank, limit=min(max(take * 4, 8), len(bank)))
+    lexical_ranked = _rank_questions_by_signal(transcript, bank)
+    if not any(score > 0.0 or is_explicit for _q, score, is_explicit in lexical_ranked):
+        return []
+    lexical_shortlist = [q for q, _score, _is_explicit in lexical_ranked[: min(max(take * 4, 8), len(bank))]]
     if not (settings.openai_api_key or "").strip() or len(lexical_shortlist) <= take:
         return lexical_shortlist[:take]
     try:
@@ -330,13 +350,10 @@ async def select_relevant_questions_async(
     best_sim = scored[0][1] if scored else 0.0
     selected: list[QuestionRecord] = []
     seen: set[str] = set()
-    for q, sim, is_explicit in scored:
-        if not is_explicit:
-            continue
-        # Явный ключ оставляем только если он не противоречит смыслу самого ответа.
-        if sim + 0.08 < best_sim:
-            continue
+    for q in lexical_shortlist:
         nk = normalize_question_key(q.question_key)
+        if nk not in explicit_keys:
+            continue
         if nk not in seen:
             selected.append(q)
             seen.add(nk)

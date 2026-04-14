@@ -37,6 +37,13 @@ _BILLET_OR_EXAM_LEAD = re.compile(
 )
 
 
+def _display_question_key(question_key: str | None) -> str:
+    key = (question_key or "").strip()
+    if not key or re.fullmatch(r"Q\d+", key, flags=re.IGNORECASE):
+        return ""
+    return f"Ключ вопроса: {key}"
+
+
 def _normalize_user_text(text: str) -> str:
     """NFC + убрать невидимые символы (ZWSP и т.д.), мешающие распознать /start."""
     t = unicodedata.normalize("NFC", text).strip()
@@ -77,20 +84,26 @@ def _telegram_answer_chrono_block(question: QuestionRecord, seg: str) -> str:
     Оценка добавляется вызывающим кодом только после этого блока.
     """
     head, tail = split_at_otvet_marker(seg)
-    title = (question.question_text or "").strip() or f"Ключ вопроса: {question.question_key}"
+    title = (question.question_text or "").strip()
+    key_line = _display_question_key(question.question_key)
     parts: list[str] = []
     if head:
         parts.append(head.strip())
-        parts.append(title)
+        if key_line:
+            parts.append(key_line)
+        if title:
+            parts.append(title)
         if tail:
             parts.append(tail.strip())
         return "\n\n".join(p for p in parts if p).strip()
     t = (tail or "").strip()
     if not t:
-        return title
-    if _BILLET_OR_EXAM_LEAD.match(t):
-        return f"{t}\n\n{title}".strip()
-    return f"{title}\n\n{t}".strip()
+        return "\n\n".join(p for p in (key_line, title) if p).strip()
+    if _BILLET_OR_EXAM_LEAD.match(t) and title:
+        return "\n\n".join(p for p in (t, key_line, title) if p).strip()
+    if title or key_line:
+        return "\n\n".join(p for p in (key_line, title, t) if p).strip()
+    return t
 
 
 def _truncate_block(text: str, max_len: int = 2000) -> str:
@@ -348,7 +361,7 @@ async def _evaluate_and_reply(
                 continue
             lines.extend(_coverage_lines(question_ordinal, r))
             totals_100.append(r.score)
-            scored.append((key, str(r.score), seg_eval, _coverage_rationale_for_sheet(r)))
+            scored.append((key, str(r.score), seg, _coverage_rationale_for_sheet(r)))
         else:
             try:
                 sim = await evaluation_service.evaluate_similarity(seg_eval, ref)
@@ -359,7 +372,7 @@ async def _evaluate_and_reply(
             lines.append(f"• Вопрос {question_ordinal}")
             lines.append(f"  — сходство: {sim:.4f}")
             sim_scores.append(sim)
-            scored.append((key, f"{sim:.4f}", seg_eval, ""))
+            scored.append((key, f"{sim:.4f}", seg, ""))
 
         first_answer = False
 

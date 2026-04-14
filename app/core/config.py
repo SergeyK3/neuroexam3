@@ -170,7 +170,11 @@ class Settings(BaseSettings):
     @staticmethod
     def _normalize_course_label(s: str) -> str:
         t = unicodedata.normalize("NFC", (s or "").strip().lower())
-        return " ".join(t.split())
+        t = " ".join(t.split())
+        # Частое сокращение в регистрационных данных: «ИИ» вместо «искусственный интеллект».
+        t = t.replace("ии в здравоохранении", "искусственный интеллект в здравоохранении")
+        t = t.replace("ии в медицине", "искусственный интеллект в медицине")
+        return t
 
     def spreadsheet_id_for_registration_course(self, registration_raw: str | None) -> str | None:
         """

@@ -25,3 +25,14 @@ def test_fuzzy_word_order_abbreviation(monkeypatch):
     monkeypatch.setattr(cfg.settings, "discipline_course_name_match_threshold", 0.45, raising=False)
     raw = "технологии информационные здравоохранение"
     assert cfg.settings.spreadsheet_id_for_registration_course(raw) == "id-it"
+
+
+def test_ai_abbreviation_matches_full_course_name(monkeypatch):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        '{"Искусственный интеллект в здравоохранении":"id-ai"}',
+        raising=False,
+    )
+    raw = "ИИ в здравоохранении\nЭкзамен\n1\nИванов"
+    assert cfg.settings.spreadsheet_id_for_registration_course(raw) == "id-ai"
