@@ -21,6 +21,7 @@ from app.services import (
 )
 from app.services.evaluation_service import CoverageScores
 from app.services.exam_text_parsing import (
+    contains_answer_completion_marker,
     extract_answer_body_for_evaluation,
     extract_ticket_number,
     split_at_otvet_marker,
@@ -129,6 +130,79 @@ def _mean_formula_similarity(scores: list[float], mean: float) -> str:
     return f"({parts}) / {n} = {mean:.4f}"
 
 
+def _expected_question_count_from_registration(
+    registration_raw: str | None,
+    transcript: str,
+) -> int:
+    _course_name, control_type, _group_number, _student_fio = results_export_service.parse_registration_lines(
+        registration_raw,
+    )
+    low = (control_type or "").strip().lower()
+    if "рубеж" in low or re.search(r"\bрк\b", low):
+        return 2
+    if (
+        "текущ" in low
+        or "текуш" in low
+        or re.search(r"\bтек\.\s*контрол", low)
+        or re.search(r"\bтк\b", low)
+    ):
+        return 2
+    if "экзам" in low or "итог" in low:
+        return 3
+    return reference_map_service.infer_expected_question_count(transcript)
+
+
+def _merge_transcripts(existing: str | None, incoming: str) -> str:
+    cur = (existing or "").strip()
+    new = incoming.strip()
+    if not cur:
+        return new
+    if not new:
+        return cur
+    return f"{cur}\n\n{new}"
+
+
+def _count_answered_questions(
+    questions: list[QuestionRecord],
+    parts: dict[str, str],
+) -> int:
+    count = 0
+    for question in questions:
+        seg = strip_answer_completion_markers((parts.get(question.question_key) or "").strip())
+        seg_eval = extract_answer_body_for_evaluation(seg).strip() or seg.strip()
+        if not seg_eval or _is_metadata_only(seg_eval):
+            continue
+        tokens = re.findall(r"[a-zа-яё0-9]+", seg_eval.lower())
+        if len(tokens) >= 4 or len(seg_eval) >= 30:
+            count += 1
+    return count
+
+
+def _has_meaningful_answer_text(text: str | None) -> bool:
+    cleaned = strip_answer_completion_markers(strip_embedded_bot_output((text or "").strip()))
+    if not cleaned or _is_metadata_only(cleaned):
+        return False
+    tokens = re.findall(r"[a-zа-яё0-9]+", cleaned.lower())
+    return len(tokens) >= 6 or len(cleaned) >= 30
+
+
+def _pending_progress_message(answered_count: int, target_count: int, completion_seen: bool) -> str:
+    base = f"Принял часть ответа: {answered_count} из {target_count}."
+    if completion_seen:
+        return (
+            f"{base} Фраза «Ответ закончен» учтена только как возможная граница между частями, "
+            "но оценка будет после получения всех ответов по билету."
+        )
+    return f"{base} Жду продолжение по следующим вопросам."
+
+
+def _transcription_too_short_message() -> str:
+    return (
+        "Распознано слишком мало текста из аудиозаписи, поэтому бот не может надёжно определить ответы по вопросам. "
+        "Пришлите аудио ещё раз или отправьте ответ текстом."
+    )
+
+
 def _preview_recognized_text(
     transcript: str,
     parts: dict[str, str],
@@ -157,8 +231,10 @@ def _preview_recognized_text(
 async def _candidate_questions_for_transcript(
     transcript: str,
     bank: list[QuestionRecord],
+    *,
+    expected_count: int | None = None,
 ) -> list[QuestionRecord]:
-    take = reference_map_service.infer_expected_question_count(transcript)
+    take = expected_count or reference_map_service.infer_expected_question_count(transcript)
     logger.info(
         "infer_expected_question_count=%d bank_size=%d",
         take, len(bank),
@@ -184,6 +260,22 @@ def _is_metadata_only(segment: str) -> bool:
     if len(s) <= 80 and re.fullmatch(r"(?:номер\s+экзаменационного\s+билета|билет|номер\s+билета)\s*\d+", s):
         return True
     return False
+
+
+def _has_explicit_segment_markers(segment: str) -> bool:
+    s = (segment or "").strip().lower()
+    if not s:
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b(?:вопрос\s*(?:номер\s*|№\s*)?\d+|"
+            r"перв(?:ый|ая|ое|ого|ой|ом)\s+вопрос|"
+            r"втор(?:ой|ая|ое|ого|ом)\s+вопрос|"
+            r"трет(?:ий|ья|ье|ьего|ьей|ьем)\s+вопрос|"
+            r"ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?)\b",
+            s,
+        ),
+    )
 
 
 def _repair_segments(
@@ -215,6 +307,11 @@ def _repair_segments(
         prev_key = key
 
     nonempty = [k for k in ordered_keys if fixed.get(k, "").strip()]
+    if len(nonempty) >= 2 and sum(1 for k in nonempty if _has_explicit_segment_markers(fixed.get(k, ""))) >= 2:
+        return fixed
+    substantial_segments = [k for k in nonempty if len(fixed.get(k, "").strip()) >= 200]
+    if len(substantial_segments) >= 2:
+        return fixed
     if len(questions) >= 2 and nonempty:
         token_map = {q.question_key: _question_semantic_tokens(q) for q in questions}
         rebuilt = {q.question_key: [] for q in questions}
@@ -270,17 +367,24 @@ async def _evaluate_and_reply(
     registration_raw: str | None = None,
     telegram_message_id: int | None = None,
     ticket_number: str | None = None,
+    expected_question_count: int | None = None,
 ) -> None:
     """Сегментация по кандидатным вопросам и оценка каждого непустого фрагмента."""
-    cleaned = strip_embedded_bot_output(strip_answer_completion_markers((transcript or "").strip()))
+    cleaned = strip_embedded_bot_output((transcript or "").strip())
     if not cleaned:
         await telegram_client.send_message(
             chat_id,
-            "После удаления служебных фраз вроде «ответ закончен» не осталось текста для оценки. "
-            "Пришлите ответ ещё раз (можно без фразы о конце ответа).",
+            "Не удалось получить текст ответа для оценки. Пришлите ответ ещё раз.",
         )
         return
     transcript = cleaned
+    transcript_for_scoring = strip_answer_completion_markers(transcript)
+    if not transcript_for_scoring.strip():
+        await telegram_client.send_message(
+            chat_id,
+            "Пока распозналась только служебная фраза о завершении ответа. Пришлите содержательный ответ.",
+        )
+        return
 
     try:
         bank = await reference_map_service.get_question_bank(
@@ -301,7 +405,11 @@ async def _evaluate_and_reply(
         )
         return
 
-    questions = await _candidate_questions_for_transcript(transcript, bank)
+    questions = await _candidate_questions_for_transcript(
+        transcript,
+        bank,
+        expected_count=expected_question_count,
+    )
     logger.info(
         "Кандидатные вопросы (%d): %s | транскрипт (%.120s…)",
         len(questions),
@@ -334,9 +442,9 @@ async def _evaluate_and_reply(
             lines.append("")
             lines.append("Примечание:")
             lines.extend(notes)
-        preview = _preview_recognized_text(transcript, parts, questions)
         lines.append("")
-        lines.append(preview)
+        lines.append("Полный транскрибированный ответ:")
+        lines.append(_truncate_block(transcript, 3500))
         await telegram_client.send_message(chat_id, "\n".join(lines))
         return
 
@@ -348,7 +456,10 @@ async def _evaluate_and_reply(
 
     lines: list[str] = []
 
-    first_answer = True
+    lines.append("Полный транскрибированный ответ:")
+    lines.append(_truncate_block(transcript, max_len=3500))
+    lines.append("")
+
     question_ordinal = 0
     for question in questions:
         key = question.question_key
@@ -356,16 +467,12 @@ async def _evaluate_and_reply(
         ref = question.reference_answer
         if not seg:
             continue
-        seg_eval = extract_answer_body_for_evaluation(seg)
+        seg_eval = extract_answer_body_for_evaluation(strip_answer_completion_markers(seg))
         if not seg_eval.strip():
-            seg_eval = seg
+            seg_eval = strip_answer_completion_markers(seg)
         question_ordinal += 1
-        if not first_answer:
-            lines.extend(["", "--------------------------------", ""])
-        # Сначала хронология (билет → вопрос → ключ → ответ), затем — только оценка.
-        display_block = _telegram_answer_chrono_block(question, seg)
-        lines.append(_truncate_block(display_block, max_len=3500))
-        lines.append("")
+        if question_ordinal > 1:
+            lines.append("")
 
         if use_coverage:
             try:
@@ -388,8 +495,6 @@ async def _evaluate_and_reply(
             lines.append(f"  — сходство: {sim:.4f}")
             sim_scores.append(sim)
             scored.append((key, f"{sim:.4f}", seg, ""))
-
-        first_answer = False
 
     if use_coverage and totals_100:
         mean_r = sum(totals_100) / len(totals_100)
@@ -421,6 +526,106 @@ async def _evaluate_and_reply(
         )
 
 
+async def _handle_answer_payload(
+    sess: ExamSession,
+    chat_id: int,
+    user_id: int,
+    raw_text: str,
+    *,
+    telegram_message_id: int | None = None,
+) -> None:
+    previous_pending = sess.pending_transcript
+    normalized = strip_embedded_bot_output((raw_text or "").strip())
+    if not normalized:
+        await telegram_client.send_message(chat_id, "Не удалось получить текст ответа. Пришлите его ещё раз.")
+        return
+    logger.info(
+        "incoming transcript: len=%d preview=%.120r",
+        len(normalized),
+        normalized,
+    )
+    if not _has_meaningful_answer_text(normalized):
+        sess.pending_transcript = previous_pending
+        sess.last_transcript = previous_pending
+        await telegram_client.send_message(chat_id, _transcription_too_short_message())
+        return
+
+    tn = extract_ticket_number(normalized)
+    if tn:
+        sess.ticket_number = tn
+
+    sess.pending_transcript = _merge_transcripts(sess.pending_transcript, normalized)
+    sess.last_transcript = sess.pending_transcript
+
+    try:
+        bank = await reference_map_service.get_question_bank(
+            sess.discipline_id,
+            registration_raw=sess.registration_raw,
+        )
+    except ValueError as e:
+        await telegram_client.send_message(
+            chat_id,
+            f"Ошибка настроек таблиц/эталонов: {telegram_client.redact_secrets(str(e))}",
+        )
+        return
+
+    if not bank:
+        await telegram_client.send_message(
+            chat_id,
+            "Нет эталонов: настройте Google Sheet и ключ, либо MVP_REFERENCES_JSON / MVP_REFERENCE_ANSWER в .env.",
+        )
+        return
+
+    expected_count = _expected_question_count_from_registration(
+        sess.registration_raw,
+        sess.pending_transcript,
+    )
+    questions = await _candidate_questions_for_transcript(
+        sess.pending_transcript,
+        bank,
+        expected_count=expected_count,
+    )
+    target_count = min(expected_count, len(questions)) if questions else expected_count
+    parts, _notes = await segmentation_service.segment_with_fallback(
+        sess.pending_transcript,
+        questions,
+        use_llm=settings.mvp_segmentation_use_llm,
+    )
+    parts = _repair_segments(sess.pending_transcript, questions, parts)
+    answered_count = _count_answered_questions(questions, parts)
+    completion_seen = contains_answer_completion_marker(normalized)
+    if answered_count == 0 and target_count <= 1 and _has_meaningful_answer_text(sess.pending_transcript):
+        answered_count = 1
+    logger.info(
+        "answer readiness: expected=%d target=%d answered=%d completion_seen=%s transcript_len=%d",
+        expected_count,
+        target_count,
+        answered_count,
+        completion_seen,
+        len(sess.pending_transcript or ""),
+    )
+
+    if answered_count < target_count:
+        await telegram_client.send_message(
+            chat_id,
+            _pending_progress_message(answered_count, target_count, completion_seen),
+        )
+        return
+
+    await _evaluate_and_reply(
+        chat_id,
+        sess.pending_transcript,
+        telegram_user_id=user_id,
+        session_id=sess.session_id,
+        discipline_id=sess.discipline_id,
+        registration_raw=sess.registration_raw,
+        telegram_message_id=telegram_message_id,
+        ticket_number=sess.ticket_number,
+        expected_question_count=expected_count,
+    )
+    sess.pending_transcript = None
+
+
 async def _handle_voice_answering(
     sess: ExamSession,
     chat_id: int,
@@ -439,24 +644,21 @@ async def _handle_voice_answering(
     try:
         audio = await telegram_client.download_file_bytes(file_id)
         lang = sess.language or "ru"
-        transcript = await speech_service.transcribe(audio, language=lang)
+        expected_question_count = _expected_question_count_from_registration(sess.registration_raw, "")
+        transcript = await speech_service.transcribe_exam_answer(
+            audio,
+            language=lang,
+            expected_question_count=expected_question_count,
+        )
         raw_tr = (transcript or "").strip()
-        tn = extract_ticket_number(raw_tr)
-        if tn:
-            sess.ticket_number = tn
-        cleaned_tr = strip_embedded_bot_output(strip_answer_completion_markers(raw_tr))
-        sess.last_transcript = cleaned_tr or raw_tr
         mid_raw = message.get("message_id")
         msg_id = mid_raw if isinstance(mid_raw, int) else None
-        await _evaluate_and_reply(
+        await _handle_answer_payload(
+            sess,
             chat_id,
-            cleaned_tr,
-            telegram_user_id=user_id,
-            session_id=sess.session_id,
-            discipline_id=sess.discipline_id,
-            registration_raw=sess.registration_raw,
+            user_id,
+            raw_tr,
             telegram_message_id=msg_id,
-            ticket_number=sess.ticket_number,
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("Ошибка конвейера голоса")
@@ -562,22 +764,14 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
 
     if out.evaluate_text:
         raw_eval = out.evaluate_text.strip()
-        tn = extract_ticket_number(raw_eval)
-        if tn:
-            out.session.ticket_number = tn
-        cleaned_eval = strip_embedded_bot_output(strip_answer_completion_markers(raw_eval))
-        out.session.last_transcript = cleaned_eval or raw_eval
         mid_raw = message.get("message_id")
         msg_id = mid_raw if isinstance(mid_raw, int) else None
-        await _evaluate_and_reply(
+        await _handle_answer_payload(
+            out.session,
             chat_id,
-            cleaned_eval,
-            telegram_user_id=user_id,
-            session_id=out.session.session_id,
-            discipline_id=out.session.discipline_id,
-            registration_raw=out.session.registration_raw,
+            user_id,
+            raw_eval,
             telegram_message_id=msg_id,
-            ticket_number=out.session.ticket_number,
         )
 
     await session_service.upsert_session(out.session)

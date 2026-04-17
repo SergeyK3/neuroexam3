@@ -32,3 +32,5 @@ class ExamSession:
     # Номер экзаменационного билета (из текста/транскрипта, см. exam_text_parsing.extract_ticket_number)
     ticket_number: str | None = None
     last_transcript: str | None = None
+    # Накопленный полный ответ по текущему билету: может состоять из нескольких сообщений.
+    pending_transcript: str | None = None

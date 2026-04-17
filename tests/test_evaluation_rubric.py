@@ -49,6 +49,40 @@ def test_coverage_json_to_scores_partial_answer_not_below_65():
     assert s.score == 65
 
 
+def test_coverage_json_to_scores_breadth_bonus_for_substantial_answer():
+    parsed = CoverageJson.model_validate(
+        {
+            "elements": [
+                {"element": "A", "coverage": "covered"},
+                {"element": "B", "coverage": "covered"},
+                {"element": "C", "coverage": "partial"},
+                {"element": "D", "coverage": "missing"},
+                {"element": "E", "coverage": "missing"},
+                {"element": "F", "coverage": "missing"},
+            ],
+        }
+    )
+    s = _coverage_json_to_scores(parsed)
+    assert s.score == 76
+
+
+def test_coverage_json_to_scores_bonus_can_raise_half_covered_mix_to_80():
+    parsed = CoverageJson.model_validate(
+        {
+            "elements": [
+                {"element": "A", "coverage": "covered"},
+                {"element": "B", "coverage": "covered"},
+                {"element": "C", "coverage": "partial"},
+                {"element": "D", "coverage": "partial"},
+                {"element": "E", "coverage": "missing"},
+                {"element": "F", "coverage": "missing"},
+            ],
+        }
+    )
+    s = _coverage_json_to_scores(parsed)
+    assert s.score == 80
+
+
 def test_cosine_same_and_orthogonal():
     assert cosine_similarity_vec([1.0, 0.0, 0.0], [1.0, 0.0, 0.0]) == 1.0
     assert cosine_similarity_vec([1.0, 0.0], [0.0, 1.0]) == 0.0

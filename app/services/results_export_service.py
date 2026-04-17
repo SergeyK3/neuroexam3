@@ -13,7 +13,7 @@ from app.services import reference_map_service
 logger = logging.getLogger(__name__)
 
 
-def _parse_registration_lines(raw: str | None) -> tuple[str, str, str, str]:
+def parse_registration_lines(raw: str | None) -> tuple[str, str, str, str]:
     """Четыре поля регистрации: дисциплина/курс, вид контроля, номер группы, ФИО (как в FSM).
 
     Три строки без номера группы (старый формат) трактуются как: курс, контроль, ФИО; группа пустая.
@@ -32,6 +32,81 @@ def _parse_registration_lines(raw: str | None) -> tuple[str, str, str, str]:
     return ("", "", "", "")
 
 
+_parse_registration_lines = parse_registration_lines
+
+
+def _documented_transcript(
+    *,
+    course_name: str,
+    control_type: str,
+    group_number: str,
+    student_fio: str,
+    ticket_number: str,
+    transcript: str,
+) -> str:
+    lines = [
+        f"Дисциплина: {course_name}" if course_name else "",
+        f"Вид контроля: {control_type}" if control_type else "",
+        f"Группа: {group_number}" if group_number else "",
+        f"Студент: {student_fio}" if student_fio else "",
+        f"Билет: {ticket_number}" if ticket_number else "",
+    ]
+    header = "\n".join(line for line in lines if line).strip()
+    body = (transcript or "").strip()
+    if header and body:
+        return f"{header}\n\nТранскрипт ответа:\n{body}"
+    return header or body
+
+
+def _parse_score_value(score_display: str) -> float | None:
+    raw = (score_display or "").strip().replace(",", ".")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def _aggregate_score_display(scored_rows: list[tuple[str, str, str, str]]) -> str:
+    items: list[str] = []
+    values: list[float] = []
+    has_fraction = False
+    for idx, (_question_key, score_display, _excerpt, _rationale) in enumerate(scored_rows, start=1):
+        items.append(f"В{idx}: {score_display}")
+        numeric = _parse_score_value(score_display)
+        if numeric is not None:
+            values.append(numeric)
+            if not numeric.is_integer():
+                has_fraction = True
+    if values:
+        mean = sum(values) / len(values)
+        mean_display = f"{mean:.4f}" if has_fraction else f"{mean:.1f}"
+        items.append(f"Средняя: {mean_display}")
+    return "; ".join(items)
+
+
+def _aggregate_rationale(
+    scored_rows: list[tuple[str, str, str, str]],
+    *,
+    discipline_slug: str,
+    session_id: str,
+) -> str:
+    blocks: list[str] = []
+    for idx, (question_key, score_display, _excerpt, rationale) in enumerate(scored_rows, start=1):
+        parts = [f"Вопрос {idx}: {score_display}"]
+        if question_key:
+            parts.append(f"Ключ: {question_key}")
+        if rationale.strip():
+            parts.append(rationale.strip())
+        blocks.append("\n".join(parts))
+    if discipline_slug:
+        blocks.append(f"Код дисциплины (бот): {discipline_slug}")
+    if session_id:
+        blocks.append(f"session: {session_id}")
+    return "\n\n".join(blocks).strip()
+
+
 async def export_question_scores(
     *,
     discipline_id: str | None,
@@ -44,7 +119,7 @@ async def export_question_scores(
     ticket_number: str | None = None,
 ) -> None:
     """
-    Для каждой оценённой строки (ключ, score_display, фрагмент, обоснование) — append в Sheets.
+    Для всего ответа студента формирует одну агрегированную строку в Sheets.
     При отсутствии credentials / id таблицы — no-op.
     """
     creds = settings.google_creds_path()
@@ -71,36 +146,45 @@ async def export_question_scores(
         return
 
     slug = (discipline_id or settings.default_discipline or "").strip() or "-"
-    course_name, control_type, group_number, student_fio = _parse_registration_lines(registration_raw)
-
-    for question_key, score_display, excerpt, rationale in scored_rows:
-        row = sheets_client.build_result_row(
-            telegram_user_id=telegram_user_id,
-            session_id=session_id,
-            discipline_slug=slug,
+    course_name, control_type, group_number, student_fio = parse_registration_lines(registration_raw)
+    row = sheets_client.build_result_row(
+        telegram_user_id=telegram_user_id,
+        session_id=session_id,
+        discipline_slug=slug,
+        course_name=course_name,
+        control_type=control_type,
+        group_number=group_number,
+        student_fio=student_fio,
+        question_key="",
+        score_display=_aggregate_score_display(scored_rows),
+        full_transcript=full_transcript,
+        answer_excerpt=_documented_transcript(
             course_name=course_name,
             control_type=control_type,
             group_number=group_number,
             student_fio=student_fio,
-            question_key=question_key,
-            score_display=score_display,
-            full_transcript=full_transcript,
-            answer_excerpt=excerpt,
-            rationale=rationale or "",
-            telegram_message_id=telegram_message_id,
             ticket_number=ticket_number or "",
+            transcript=full_transcript,
+        ),
+        rationale=_aggregate_rationale(
+            scored_rows,
+            discipline_slug=slug,
+            session_id=session_id,
+        ),
+        telegram_message_id=telegram_message_id,
+        ticket_number=ticket_number or "",
+    )
+    try:
+        await asyncio.to_thread(
+            sheets_client.append_with_retries,
+            sheet_id,
+            tab,
+            credentials_path=creds,
+            row=row,
         )
-        try:
-            await asyncio.to_thread(
-                sheets_client.append_with_retries,
-                sheet_id,
-                tab,
-                credentials_path=creds,
-                row=row,
-            )
-        except Exception:
-            logger.exception(
-                "Не удалось записать результат в Sheets %s / %s",
-                sheet_id,
-                tab,
-            )
+    except Exception:
+        logger.exception(
+            "Не удалось записать результат в Sheets %s / %s",
+            sheet_id,
+            tab,
+        )

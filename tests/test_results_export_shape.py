@@ -38,3 +38,32 @@ def test_parse_registration_four_lines():
     assert b == "Экзамен"
     assert g == "Гр-12"
     assert c == "Петров П.П."
+
+
+def test_aggregate_score_display_includes_mean():
+    value = results_export_service._aggregate_score_display(
+        [
+            ("Q1", "80", "фрагмент 1", "обоснование 1"),
+            ("Q2", "90", "фрагмент 2", "обоснование 2"),
+        ],
+    )
+    assert "В1: 80" in value
+    assert "В2: 90" in value
+    assert "Средняя: 85.0" in value
+
+
+def test_documented_transcript_duplicates_registration_data():
+    documented = results_export_service._documented_transcript(
+        course_name="Медицина",
+        control_type="Экзамен",
+        group_number="Гр-12",
+        student_fio="Петров П.П.",
+        ticket_number="17",
+        transcript="Полный ответ студента",
+    )
+    assert "Дисциплина: Медицина" in documented
+    assert "Вид контроля: Экзамен" in documented
+    assert "Группа: Гр-12" in documented
+    assert "Студент: Петров П.П." in documented
+    assert "Билет: 17" in documented
+    assert documented.endswith("Полный ответ студента")

@@ -36,8 +36,9 @@ _COMPLETION_PHRASES = (
 _COMPLETION_RE = re.compile(
     r"(?iu)(?<!\w)(?:" + "|".join(_COMPLETION_PHRASES) + r")(?!\w)\s*[\.,!?;:…]*",
 )
+COMPLETION_MARKER_RE = _COMPLETION_RE
 _LEGACY_BOT_OUTPUT_START_RE = re.compile(
-    r"(?is)(?:^|\n|\s)(?:•\s*)?Вопрос\s+1\b.*",
+    r"(?im)^(?:\s*)(?:•\s*)?Вопрос\s+1\b.*",
 )
 _LEGACY_BOT_TAIL_RE = re.compile(
     r"(?is)(?:"
@@ -129,6 +130,13 @@ def strip_answer_completion_markers(text: str | None) -> str:
     t = re.sub(r"[ \t]+", " ", t)
     t = re.sub(r"\n{3,}", "\n\n", t)
     return t.strip()
+
+
+def contains_answer_completion_marker(text: str | None) -> bool:
+    """Есть ли в тексте устный маркер завершения/перехода между частями ответа."""
+    if not text or not str(text).strip():
+        return False
+    return bool(_COMPLETION_RE.search(unicodedata.normalize("NFC", str(text))))
 
 
 def strip_embedded_bot_output(text: str | None) -> str:

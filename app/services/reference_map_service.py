@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from difflib import SequenceMatcher
 
 from app.core.config import settings
 from app.integrations.sheets_client import fetch_ideal_references, fetch_question_bank
@@ -51,6 +52,26 @@ _STOPWORDS = {
     "билет",
     "номер",
 }
+_RU_SPOKEN_NUMBER_WORDS = {
+    "ноль": "0",
+    "один": "1",
+    "раз": "1",
+    "два": "2",
+    "три": "3",
+    "четыре": "4",
+    "пять": "5",
+    "шесть": "6",
+    "семь": "7",
+    "восемь": "8",
+    "девять": "9",
+    "десять": "10",
+}
+_SPOKEN_KEY_TOKEN_RE = r"(?:\d+|ноль|один|раз|два|три|четыре|пять|шесть|семь|восемь|девять|десять)"
+_ORDINAL_QUESTION_INSERT_RE = (
+    r"(?:перв(?:ого|ый)|втор(?:ого|ой)|трет(?:ьего|ий)|"
+    r"четв[её]рт(?:ого|ый)|пят(?:ого|ый)|шест(?:ого|ой)|"
+    r"седьм(?:ого|ой)|восьм(?:ого|ой)|девят(?:ого|ый)|десят(?:ого|ый))\s+вопроса?"
+)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -82,6 +103,35 @@ def _digits_of(key: str) -> str:
     return re.sub(r"\D", "", key)
 
 
+def parse_spoken_key_fragment(fragment: str | None) -> str:
+    """Нормализует цифровой или словесный ключ: «один четыре два» -> «1-4-2»."""
+    raw = (fragment or "").strip().lower()
+    if not raw:
+        return ""
+
+    numeric_groups = re.findall(r"\d+", raw)
+    if len(numeric_groups) >= 2:
+        return "-".join(numeric_groups)
+    if len(numeric_groups) == 1 and re.fullmatch(r"[0-9\s,./-]+", raw):
+        return numeric_groups[0]
+
+    tokens = re.findall(r"[a-zа-яё0-9]+", raw)
+    out: list[str] = []
+    for tok in tokens:
+        if tok.isdigit():
+            out.append(tok)
+            continue
+        mapped = _RU_SPOKEN_NUMBER_WORDS.get(tok)
+        if mapped is None:
+            break
+        out.append(mapped)
+    if len(out) >= 2:
+        return "-".join(out)
+    if len(out) == 1:
+        return out[0]
+    return normalize_question_key(raw)
+
+
 def _is_explicit_match(normalized_bank_key: str, explicit_keys: set[str]) -> bool:
     """Точное или digits-only совпадение (STT часто склеивает цифры ключа без разделителей)."""
     if normalized_bank_key in explicit_keys:
@@ -104,6 +154,86 @@ def _question_overlap_score(transcript_tokens: set[str], q: QuestionRecord) -> f
     if not transcript_tokens or not (q_tokens or r_tokens):
         return 0.0
     return 2.0 * len(transcript_tokens & q_tokens) + 1.0 * len(transcript_tokens & r_tokens)
+
+
+def _extract_spoken_question_texts(transcript: str | None) -> list[str]:
+    """Формулировки вопросов, которые студент/бот проговорил в транскрипте."""
+    text = (transcript or "").strip()
+    if not text:
+        return []
+    patterns = [
+        re.compile(
+            r"(?is)\bвопрос\s*(?:номер\s*|№\s*)?\d+\s*[:.,;]?\s*(.+?)(?=\b(?:ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?|ответ)\b|$)",
+        ),
+        re.compile(
+            r"(?is)\b(?:первый|второй|третий|четвертый|четвёртый|пятый)\s+вопрос\s*[:.,;]?\s*(.+?)(?=\b(?:ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?|ответ)\b|$)",
+        ),
+        re.compile(
+            rf"(?is)\b(?:ключ(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s*вопроса)?(?:\s+номер)?|"
+            rf"шифр(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s+номер)?|"
+            rf"код(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s*вопроса)?(?:\s+номер)?)\b"
+            rf"\s*[:.;,]?\s*{_SPOKEN_KEY_TOKEN_RE}(?:[\s,./-]+{_SPOKEN_KEY_TOKEN_RE}){{0,5}}\s*[:.;,]?\s*"
+            r"(.+?)(?=\bответ\b|$)",
+        ),
+    ]
+    out: list[str] = []
+    seen: set[str] = set()
+    for rx in patterns:
+        for m in rx.finditer(text):
+            candidate = re.sub(r"\s+", " ", (m.group(1) or "").strip(" \n\t-:.;,?")).strip()
+            if len(candidate) < 8:
+                continue
+            norm = candidate.lower()
+            if norm in seen:
+                continue
+            seen.add(norm)
+            out.append(candidate)
+    return out
+
+
+def _question_text_similarity(spoken_text: str, question_text: str) -> float:
+    if not spoken_text or not question_text:
+        return 0.0
+    spoken_norm = " ".join(_tokenize(spoken_text))
+    question_norm = " ".join(_tokenize(question_text))
+    if not spoken_norm or not question_norm:
+        return 0.0
+    s_tokens = set(spoken_norm.split())
+    q_tokens = set(question_norm.split())
+    overlap = len(s_tokens & q_tokens) / max(1, len(q_tokens))
+    ratio = SequenceMatcher(a=spoken_norm, b=question_norm).ratio()
+    return max(overlap, ratio)
+
+
+def _select_questions_by_spoken_question_text(
+    transcript: str,
+    bank: list[QuestionRecord],
+    *,
+    limit: int,
+) -> list[tuple[QuestionRecord, float]]:
+    """Приоритетный выбор по названной формулировке вопроса из транскрипта."""
+    spoken_questions = _extract_spoken_question_texts(transcript)
+    if not spoken_questions:
+        return []
+    selected: list[tuple[QuestionRecord, float]] = []
+    seen_bank_keys: set[str] = set()
+    for spoken in spoken_questions:
+        best_q: QuestionRecord | None = None
+        best_score = 0.0
+        for q in bank:
+            nk = normalize_question_key(q.question_key)
+            if nk in seen_bank_keys:
+                continue
+            score = _question_text_similarity(spoken, q.question_text)
+            if score > best_score:
+                best_score = score
+                best_q = q
+        if best_q is not None and best_score >= 0.55:
+            selected.append((best_q, best_score))
+            seen_bank_keys.add(normalize_question_key(best_q.question_key))
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
 
 
 def _rank_questions_by_signal(
@@ -135,13 +265,108 @@ def _extract_explicit_keys(transcript: str | None) -> set[str]:
     text = transcript or ""
     hits: set[str] = set()
     for m in re.finditer(
-        r"(?is)\b(?:ключ(?:\s*вопроса)?(?:\s+номер)?|шифр(?:\s+номер)?|код(?:\s*вопроса)?(?:\s+номер)?|по\s+(?:шифру|коду|ключу))\b\s*[:.;,]?\s*([0-9][0-9\s,./-]*)",
+        rf"(?is)\b(?:ключ(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s*вопроса)?(?:\s+номер)?|"
+        rf"шифр(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s+номер)?|"
+        rf"код(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s*вопроса)?(?:\s+номер)?|"
+        rf"по\s+(?:шифру|коду|ключу))\b\s*[:.;,]?\s*({_SPOKEN_KEY_TOKEN_RE}(?:[\s,./-]+{_SPOKEN_KEY_TOKEN_RE}){{0,5}})",
         text,
     ):
-        norm = normalize_question_key(m.group(1))
+        norm = parse_spoken_key_fragment(m.group(1))
         if norm:
             hits.add(norm)
     return hits
+
+
+def _extract_explicit_keys_in_order(transcript: str | None) -> list[str]:
+    """Явно произнесённые ключи в порядке появления, без потери дублей до дедупликации."""
+    text = transcript or ""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for m in re.finditer(
+        rf"(?is)\b(?:ключ(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s*вопроса)?(?:\s+номер)?|"
+        rf"шифр(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s+номер)?|"
+        rf"код(?:\s+(?:{_ORDINAL_QUESTION_INSERT_RE}))?(?:\s*вопроса)?(?:\s+номер)?|"
+        rf"по\s+(?:шифру|коду|ключу))\b\s*[:.;,]?\s*({_SPOKEN_KEY_TOKEN_RE}(?:[\s,./-]+{_SPOKEN_KEY_TOKEN_RE}){{0,5}})",
+        text,
+    ):
+        norm = parse_spoken_key_fragment(m.group(1))
+        if norm and norm not in seen:
+            ordered.append(norm)
+            seen.add(norm)
+    return ordered
+
+
+def _select_questions_by_text_then_key(
+    transcript: str,
+    bank: list[QuestionRecord],
+    *,
+    limit: int,
+) -> list[QuestionRecord]:
+    """Сначала сопоставление по question_text, затем key только валидирует/уточняет."""
+    spoken_selected = _select_questions_by_spoken_question_text(transcript, bank, limit=limit)
+    explicit_keys = _extract_explicit_keys_in_order(transcript)
+    if not spoken_selected and not explicit_keys:
+        return []
+
+    selected: list[QuestionRecord] = []
+    seen_keys: set[str] = set()
+
+    for idx, (text_q, text_score) in enumerate(spoken_selected):
+        chosen = text_q
+        explicit = explicit_keys[idx] if idx < len(explicit_keys) else ""
+        if explicit and text_score < 0.72:
+            for candidate in bank:
+                nk = normalize_question_key(candidate.question_key)
+                if nk in seen_keys:
+                    continue
+                if _is_explicit_match(nk, {explicit}):
+                    chosen = candidate
+                    break
+        chosen_key = normalize_question_key(chosen.question_key)
+        if chosen_key in seen_keys:
+            continue
+        selected.append(chosen)
+        seen_keys.add(chosen_key)
+        if len(selected) >= limit:
+            return selected[:limit]
+
+    if len(selected) < limit:
+        for q in _select_questions_by_explicit_keys(transcript, bank, limit=limit):
+            nk = normalize_question_key(q.question_key)
+            if nk in seen_keys:
+                continue
+            selected.append(q)
+            seen_keys.add(nk)
+            if len(selected) >= limit:
+                return selected[:limit]
+
+    return selected[:limit]
+
+
+def _select_questions_by_explicit_keys(
+    transcript: str,
+    bank: list[QuestionRecord],
+    *,
+    limit: int,
+) -> list[QuestionRecord]:
+    """Приоритетный выбор по явно произнесённым ключам из всего банка, а не из shortlist."""
+    explicit_keys = _extract_explicit_keys_in_order(transcript)
+    if not explicit_keys:
+        return []
+    selected: list[QuestionRecord] = []
+    seen_bank_keys: set[str] = set()
+    for explicit in explicit_keys:
+        for q in bank:
+            normalized_bank_key = normalize_question_key(q.question_key)
+            if normalized_bank_key in seen_bank_keys:
+                continue
+            if _is_explicit_match(normalized_bank_key, {explicit}):
+                selected.append(q)
+                seen_bank_keys.add(normalized_bank_key)
+                break
+        if len(selected) >= limit:
+            break
+    return selected[:limit]
 
 
 def infer_expected_question_count(transcript: str | None) -> int:
@@ -302,8 +527,20 @@ def select_relevant_questions(
         return []
     take = limit if limit is not None else infer_expected_question_count(transcript)
     take = min(max(take, 1), len(bank))
+    selected = _select_questions_by_text_then_key(transcript, bank, limit=take)
+    if len(selected) >= take:
+        return selected[:take]
+    seen = {normalize_question_key(q.question_key) for q in selected}
     ranked = _rank_questions_by_signal(transcript, bank)
-    return [q for q, _score, _is_explicit in ranked[:take]]
+    for q, _score, _is_explicit in ranked:
+        nk = normalize_question_key(q.question_key)
+        if nk in seen:
+            continue
+        selected.append(q)
+        seen.add(nk)
+        if len(selected) >= take:
+            break
+    return selected[:take]
 
 
 async def select_relevant_questions_async(
@@ -316,10 +553,22 @@ async def select_relevant_questions_async(
         return []
     take = limit if limit is not None else infer_expected_question_count(transcript)
     take = min(max(take, 1), len(bank))
+    selected = _select_questions_by_text_then_key(transcript, bank, limit=take)
+    if len(selected) >= take:
+        return selected[:take]
+    seen: set[str] = {normalize_question_key(q.question_key) for q in selected}
     lexical_ranked = _rank_questions_by_signal(transcript, bank)
     lexical_shortlist = [q for q, _score, _is_explicit in lexical_ranked[: min(max(take * 4, 8), len(bank))]]
     if not (settings.openai_api_key or "").strip() or len(lexical_shortlist) <= take:
-        return lexical_shortlist[:take]
+        for q in lexical_shortlist:
+            nk = normalize_question_key(q.question_key)
+            if nk in seen:
+                continue
+            selected.append(q)
+            seen.add(nk)
+            if len(selected) >= take:
+                break
+        return selected[:take]
     try:
         from openai import AsyncOpenAI
     except ImportError:
@@ -357,17 +606,6 @@ async def select_relevant_questions_async(
         reverse=True,
     )
     best_sim = scored[0][1] if scored else 0.0
-    selected: list[QuestionRecord] = []
-    seen: set[str] = set()
-    for q, sim, is_explicit in scored:
-        if not is_explicit:
-            continue
-        nk = normalize_question_key(q.question_key)
-        if nk not in seen:
-            selected.append(q)
-            seen.add(nk)
-        if len(selected) >= take:
-            return selected[:take]
     for q, _sim, _is_explicit in scored:
         nk = normalize_question_key(q.question_key)
         if nk in seen:

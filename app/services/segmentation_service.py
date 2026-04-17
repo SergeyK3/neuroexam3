@@ -9,7 +9,12 @@ import re
 import unicodedata
 
 from app.models.question_bank import QuestionRecord
-from app.services.reference_map_service import normalize_question_key
+from app.services.exam_text_parsing import COMPLETION_MARKER_RE
+from app.services.reference_map_service import (
+    _SPOKEN_KEY_TOKEN_RE,
+    normalize_question_key,
+    parse_spoken_key_fragment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +55,9 @@ def _typo_correct_digit_triple_tokens(transcript: str, keys: list[str]) -> str:
 
 def _expand_stt_concat_keys(text: str, canon_keys: list[str]) -> str:
     """
-    STT часто пишет «ключ 114» вместо «ключ 1-1-4».
-    Подменяем слитные/пробельные цифры после «ключ/шифр/код» на канонический ключ,
+    STT часто пишет «ключ 114» вместо «ключ 1-1-4»,
+    либо словесно «ключ один четыре два».
+    Подменяем цифровые/словесные ключи после «ключ/шифр/код» на канонический ключ,
     если цифровое содержание совпадает с одним из ключей банка.
     """
     digit_map: dict[str, str] = {}
@@ -71,12 +77,13 @@ def _expand_stt_concat_keys(text: str, canon_keys: list[str]) -> str:
     def repl(m: re.Match[str]) -> str:
         prefix = m.group(1)
         raw_num = m.group(2)
-        digits = re.sub(r"\D", "", raw_num)
+        parsed = parse_spoken_key_fragment(raw_num)
+        digits = re.sub(r"\D", "", parsed)
         canon = digit_map.get(digits)
         return prefix + canon if canon else m.group(0)
 
     return re.sub(
-        rf"(?i)({_intro}\s*[:.;,]?\s*)(\d+(?:\s+\d+)*)\b",
+        rf"(?i)({_intro}\s*[:.;,]?\s*)({_SPOKEN_KEY_TOKEN_RE}(?:[\s,./-]+{_SPOKEN_KEY_TOKEN_RE}){{0,5}})\b",
         repl,
         text,
     )
@@ -199,6 +206,8 @@ _RX_TRANSITION = re.compile(
     r")\b",
 )
 
+_RX_COMPLETION_TRANSITION = COMPLETION_MARKER_RE
+
 
 def _trim_leading_question_key_phrase(segment: str) -> str:
     """Убирает в начале фрагмента устные вводные (порядковые «вопрос»/«ключ», переходы) — без привязки к кодам из таблицы."""
@@ -272,6 +281,26 @@ def _try_transition_markers(transcript: str, keys: list[str]) -> dict[str, str] 
         if i > 0:
             chunk = _trim_leading_question_key_phrase(chunk)
         out[k] = chunk
+    if sum(1 for v in out.values() if v.strip()) >= 2:
+        return out
+    return None
+
+
+def _try_completion_markers(transcript: str, keys: list[str]) -> dict[str, str] | None:
+    """Фразы завершения ответа могут разделять части одного билета, но не должны обрезать весь ответ."""
+    if len(keys) < 2:
+        return None
+    text = transcript.strip()
+    marks = list(_RX_COMPLETION_TRANSITION.finditer(text))
+    need = len(keys) - 1
+    if len(marks) < need:
+        return None
+    cuts = [m.end() for m in marks[:need]]
+    boundaries = [0] + cuts + [len(text)]
+    out: dict[str, str] = {k: "" for k in keys}
+    for i, k in enumerate(keys):
+        chunk = text[boundaries[i] : boundaries[i + 1]].strip()
+        out[k] = _trim_leading_question_key_phrase(chunk) if i > 0 else chunk
     if sum(1 for v in out.values() if v.strip()) >= 2:
         return out
     return None
@@ -379,6 +408,10 @@ def segment_transcript_to_keys(
     if tr:
         return tr, None, False
 
+    compl = _try_completion_markers(t, keys)
+    if compl:
+        return compl, None, False
+
     for sep in ("\n---\n", "\r\n---\r\n", "\n###\n", "\n***\n"):
         parts = t.split(sep)
         if len(parts) == len(keys):
@@ -434,6 +467,8 @@ async def segment_transcript_llm(
         "Ниже единый транскрипт (возможно несколько ответов подряд). "
         "Раздели текст на фрагменты по смыслу для каждого ключа. Студент может обозначать вопрос по-разному "
         "(«ключ …», «ключ вопроса …», «шифр», «код», «номер вопроса», порядковые «первый/второй вопрос» и т.п.). "
+        "Если в транскрипте явно назван ключ вопроса, этот фрагмент нужно привязать именно к этому ключу, "
+        "а не к семантически похожему соседнему вопросу. Не подменяй произнесённый ключ другим.\n"
         "Если для ключа ничего нет — пустая строка.\n"
         "Верни ТОЛЬКО JSON-объект: ключи — те же строки, значения — фрагменты ответа.\n\n"
         f"Транскрипт:\n{transcript}"

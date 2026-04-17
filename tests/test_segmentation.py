@@ -101,6 +101,16 @@ def test_transition_speech_markers():
     assert "второму" in parts["Q2"]
 
 
+def test_completion_markers_can_split_two_answers():
+    t = "Ответ по первому вопросу. Ответ закончен. Ответ по второму вопросу."
+    keys = ["Q1", "Q2"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert "первому" in parts["Q1"]
+    assert "второму" in parts["Q2"]
+
+
 def test_bilet_preamble_merges_to_first_spoken_key_not_first_sheet_row():
     """Преамбула с билетом — к первому произнесённому шифру, не к первой строке эталонов."""
     t = (
@@ -213,6 +223,19 @@ def test_stt_space_separated_key_digits():
     assert err is None
     assert "первый" in parts["1-1-4"].lower()
     assert "второй" in parts["2-1-4"].lower()
+
+
+def test_spoken_number_keys_split_two_questions():
+    t = (
+        "Ключ один четыре два. Ответ первый про ЛЛМ в здравоохранении. "
+        "Ключ два десять шесть. Ответ второй про защиту данных."
+    )
+    keys = ["1-4-2", "2-10-6"]
+    parts, err, try_llm = segmentation_service.segment_transcript_to_keys(t, keys)
+    assert err is None
+    assert try_llm is False
+    assert "ЛЛМ" in parts["1-4-2"]
+    assert "защит" in parts["2-10-6"].lower()
 
 
 def test_real_whisper_two_keys_no_vopros_word():

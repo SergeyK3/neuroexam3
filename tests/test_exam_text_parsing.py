@@ -1,6 +1,7 @@
 """Парсинг номера билета из ответа."""
 
 from app.services.exam_text_parsing import (
+    contains_answer_completion_marker,
     extract_answer_body_for_evaluation,
     extract_ticket_number,
     split_at_otvet_marker,
@@ -38,6 +39,11 @@ def test_strip_completion_kazakh():
 
 def test_strip_completion_only_marker():
     assert strip_answer_completion_markers("Ответ закончен.") == ""
+
+
+def test_contains_completion_marker():
+    assert contains_answer_completion_marker("Краткий ответ. Ответ закончен.")
+    assert not contains_answer_completion_marker("Краткий ответ без служебной фразы.")
 
 
 def test_extract_answer_after_otvet_oral_exam():
@@ -94,3 +100,12 @@ def test_strip_embedded_bot_output_from_error_tail():
     raw = "Ключ вопроса: 1-2-1 Ответ студента. Ошибка Бот не смог разделить ответ."
     out = strip_embedded_bot_output(raw)
     assert out == "Ключ вопроса: 1-2-1 Ответ студента."
+
+
+def test_strip_embedded_bot_output_keeps_inline_exam_question_text():
+    raw = (
+        "Билет номер 10. Вопрос 1. Перечислите основные методы обезличивания данных. "
+        "Ключ 292. Ответ. Длинный содержательный ответ."
+    )
+    out = strip_embedded_bot_output(raw)
+    assert out == raw

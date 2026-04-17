@@ -74,6 +74,36 @@ def test_select_relevant_questions_matches_concat_digit_key():
     assert "2-1-4" in keys
 
 
+def test_select_relevant_questions_matches_spoken_digit_key():
+    bank = [
+        QuestionRecord(question_key="1-4-2", question_text="LLM в здравоохранении", reference_answer="Ответ 1"),
+        QuestionRecord(question_key="2-10-6", question_text="Защита данных", reference_answer="Ответ 2"),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Второй вопрос, ключ один четыре два, какие основные задачи решает ЛЛМ здравоохранения?",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["1-4-2"]
+
+
+def test_select_relevant_questions_matches_spoken_mixed_key_with_ten():
+    bank = [
+        QuestionRecord(question_key="1-4-2", question_text="LLM в здравоохранении", reference_answer="Ответ 1"),
+        QuestionRecord(question_key="2-10-6", question_text="Защита данных", reference_answer="Ответ 2"),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Второй вопрос, ключ два десять шесть, какие меры принимаются для защиты данных?",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["2-10-6"]
+
+
 def test_select_relevant_questions_falls_back_to_top_ranked():
     bank = [
         QuestionRecord(question_key="1-1-1", question_text="Безопасность данных пациентов", reference_answer="Шифрование и аудит"),
@@ -87,6 +117,69 @@ def test_select_relevant_questions_falls_back_to_top_ranked():
     )
 
     assert len(selected) == 1
+
+
+def test_select_relevant_questions_prefers_explicit_key_over_semantic_ranking():
+    bank = [
+        QuestionRecord(question_key="292", question_text="Методы обезличивания данных", reference_answer="Удаление идентификаторов"),
+        QuestionRecord(question_key="2-10-2", question_text="Принципы ответственного использования данных", reference_answer="Конфиденциальность"),
+        QuestionRecord(question_key="2-9-2", question_text="Безопасность хранения", reference_answer="Шифрование"),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Билет номер 10. Вопрос 1. Ключ 292. Ответ про обезличивание данных.",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["292"]
+
+
+def test_select_relevant_questions_prefers_spoken_question_text_over_wrong_key():
+    bank = [
+        QuestionRecord(
+            question_key="292",
+            question_text="Перечислите основные методы обезличивания данных",
+            reference_answer="Удаление идентификаторов",
+        ),
+        QuestionRecord(
+            question_key="2-10-2",
+            question_text="Перечислите основные принципы ответственного использования данных",
+            reference_answer="Конфиденциальность",
+        ),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Билет номер 10. Вопрос 1. Перечислите основные методы обезличивания данных. Ключ 2.10.2. Ответ про обезличивание.",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["292"]
+
+
+def test_select_relevant_questions_reads_question_text_after_key_phrase():
+    bank = [
+        QuestionRecord(
+            question_key="1-1-2",
+            question_text="Какое строение имеет биологический нейрон",
+            reference_answer="Тело, дендриты, аксон",
+        ),
+        QuestionRecord(
+            question_key="1-5-7",
+            question_text="Как технология доверенного ИИ снижает риски",
+            reference_answer="Контроль, прозрачность, аудит",
+        ),
+    ]
+
+    selected = reference_map_service.select_relevant_questions(
+        "Ключ первого вопроса 1.1.2. Какое строение имеет биологический нейрон. "
+        "Ключ второго вопроса 1.5.7. Как технология доверенного ИИ снижает риски.",
+        bank,
+        limit=2,
+    )
+
+    assert [q.question_key for q in selected] == ["1-1-2", "1-5-7"]
 
 @pytest.mark.asyncio
 async def test_get_reference_map_uses_env_when_no_sheets(monkeypatch):
@@ -228,6 +321,87 @@ async def test_select_relevant_questions_async_both_explicit_keys_selected(monke
 
     keys = {q.question_key for q in selected}
     assert keys == {"1-1-4", "1-2-4"}
+
+
+@pytest.mark.asyncio
+async def test_select_relevant_questions_async_explicit_key_can_bypass_shortlist(monkeypatch):
+    """Явный ключ должен выбираться по всему банку, даже если семантически не попал бы в shortlist."""
+    monkeypatch.setattr(cfg.settings, "openai_api_key", "", raising=False)
+    bank = [
+        QuestionRecord(question_key="292", question_text="Методы обезличивания данных", reference_answer="Удаление идентификаторов"),
+        QuestionRecord(question_key="2-10-2", question_text="Принципы ответственного использования данных", reference_answer="Конфиденциальность"),
+        QuestionRecord(question_key="2-9-2", question_text="Безопасность хранения", reference_answer="Шифрование"),
+        QuestionRecord(question_key="8-8-8", question_text="Совсем другой вопрос", reference_answer="Другое"),
+    ]
+
+    selected = await reference_map_service.select_relevant_questions_async(
+        "Билет номер 10. Вопрос 1. Ключ 292. Ответ про обезличивание данных.",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["292"]
+
+
+@pytest.mark.asyncio
+async def test_select_relevant_questions_async_prefers_spoken_question_text_over_wrong_key(monkeypatch):
+    monkeypatch.setattr(cfg.settings, "openai_api_key", "", raising=False)
+    bank = [
+        QuestionRecord(
+            question_key="292",
+            question_text="Перечислите основные методы обезличивания данных",
+            reference_answer="Удаление идентификаторов",
+        ),
+        QuestionRecord(
+            question_key="2-10-2",
+            question_text="Перечислите основные принципы ответственного использования данных",
+            reference_answer="Конфиденциальность",
+        ),
+        QuestionRecord(
+            question_key="8-8-8",
+            question_text="Совсем другой вопрос",
+            reference_answer="Другое",
+        ),
+    ]
+
+    selected = await reference_map_service.select_relevant_questions_async(
+        "Билет номер 10. Вопрос 1. Перечислите основные методы обезличивания данных. Ключ 2.10.2. Ответ про обезличивание.",
+        bank,
+        limit=1,
+    )
+
+    assert [q.question_key for q in selected] == ["292"]
+
+
+@pytest.mark.asyncio
+async def test_select_relevant_questions_async_reads_question_text_after_key_phrase(monkeypatch):
+    monkeypatch.setattr(cfg.settings, "openai_api_key", "", raising=False)
+    bank = [
+        QuestionRecord(
+            question_key="1-1-2",
+            question_text="Какое строение имеет биологический нейрон",
+            reference_answer="Тело, дендриты, аксон",
+        ),
+        QuestionRecord(
+            question_key="1-5-7",
+            question_text="Как технология доверенного ИИ снижает риски",
+            reference_answer="Контроль, прозрачность, аудит",
+        ),
+        QuestionRecord(
+            question_key="8-8-8",
+            question_text="Совсем другой вопрос",
+            reference_answer="Другое",
+        ),
+    ]
+
+    selected = await reference_map_service.select_relevant_questions_async(
+        "Ключ первого вопроса 1.1.2. Какое строение имеет биологический нейрон. "
+        "Ключ второго вопроса 1.5.7. Как технология доверенного ИИ снижает риски.",
+        bank,
+        limit=2,
+    )
+
+    assert [q.question_key for q in selected] == ["1-1-2", "1-5-7"]
 
 
 @pytest.mark.asyncio
