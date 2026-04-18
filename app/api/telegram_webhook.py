@@ -67,6 +67,11 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
     pool = getattr(request.app.state, "arq_pool", None)
     if pool is not None:
         await pool.enqueue_job(JOB_NAME, update, _job_id=f"tg-{validated.update_id}")
+        logger.info(
+            "Telegram webhook: задача в очереди (%s), update_id=%s",
+            JOB_NAME,
+            validated.update_id,
+        )
     else:
         await handle_telegram_update(update)
     return {"ok": True}
