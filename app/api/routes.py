@@ -3,8 +3,10 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 
+from app.api.deps import enforce_max_body, read_upload_capped, require_bearer
+from app.core.config import settings
 from app.services import evaluation_service, speech_service
 from app.services.exam_text_parsing import strip_answer_completion_markers, strip_embedded_bot_output
 
@@ -13,14 +15,25 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/exam", tags=["exam"])
 
 
-@router.post("/evaluate-voice")
+def _check_text_len(name: str, value: str) -> None:
+    if len(value) > settings.max_text_chars:
+        raise HTTPException(
+            status_code=413,
+            detail=f"{name} exceeds limit of {settings.max_text_chars} chars",
+        )
+
+
+@router.post("/evaluate-voice", dependencies=[Depends(require_bearer)])
 async def evaluate_voice(
+    request: Request,
     audio: Annotated[UploadFile, File(description="Voice recording (OGG/OPUS/WAV)")],
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
     language: Annotated[str, Form(description="BCP-47 language code")] = "ru",
 ):
     """Распознавание речи и оценка: покрытие смысловых элементов или семантическое сходство 0–1."""
-    audio_bytes = await audio.read()
+    enforce_max_body(request, settings.max_audio_bytes + settings.max_text_chars + 4096)
+    _check_text_len("reference", reference)
+    audio_bytes = await read_upload_capped(audio, settings.max_audio_bytes)
     transcript = strip_embedded_bot_output(strip_answer_completion_markers(
         (await speech_service.transcribe(audio_bytes, language=language)).strip(),
     ))
@@ -53,12 +66,16 @@ async def evaluate_voice(
     }
 
 
-@router.post("/evaluate-text")
+@router.post("/evaluate-text", dependencies=[Depends(require_bearer)])
 async def evaluate_text(
+    request: Request,
     student_answer: Annotated[str, Form(description="Student answer as plain text")],
     reference: Annotated[str, Form(description="Reference (correct) answer text")],
 ):
     """Текстовый ответ: покрытие смысловых элементов или семантическое сходство по эмбеддингам."""
+    enforce_max_body(request, 2 * settings.max_text_chars + 4096)
+    _check_text_len("student_answer", student_answer)
+    _check_text_len("reference", reference)
     student_answer = strip_embedded_bot_output(strip_answer_completion_markers(student_answer.strip()))
     if not student_answer:
         raise HTTPException(

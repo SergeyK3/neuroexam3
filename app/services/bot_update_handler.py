@@ -11,6 +11,7 @@ from app.integrations import telegram_client
 from app.models.question_bank import QuestionRecord
 from app.models.session import ExamSession, ExamState
 from app.services import (
+    bot_texts,
     evaluation_service,
     fsm_service,
     reference_map_service,
@@ -19,6 +20,7 @@ from app.services import (
     session_service,
     speech_service,
 )
+from app.services.bot_texts import detect_message_language, t
 from app.services.evaluation_service import CoverageScores
 from app.services.exam_text_parsing import (
     contains_answer_completion_marker,
@@ -32,6 +34,7 @@ from app.services.exam_text_parsing import (
 logger = logging.getLogger(__name__)
 
 _START_RE = re.compile(r"^/start(?:@\w+)?(?:\s|$)", re.IGNORECASE)
+_NEW_RE = re.compile(r"^/new(?:@\w+)?(?:\s|$)", re.IGNORECASE)
 # Текст начинается с реквизитов билета — в чате сначала вводная, потом строка ключа (не наоборот).
 _BILLET_OR_EXAM_LEAD = re.compile(
     r"(?is)^\s*(?:билет|номер\s+билета|экзаменационн(?:ый|ого)\s+билет|№\s*билета)",
@@ -65,17 +68,19 @@ def _coverage_rationale_for_sheet(r: CoverageScores) -> str:
     return "\n\n".join(parts)
 
 
-def _coverage_lines(question_ordinal: int, r: CoverageScores) -> list[str]:
-    """Telegram: оценка по покрытию смысловых элементов."""
-    lines: list[str] = [f"• Вопрос {question_ordinal}", f"  — покрытие смысловых элементов: {r.score}/100"]
+def _coverage_lines_localized(question_ordinal: int, r: CoverageScores, lang: str) -> list[str]:
+    lines: list[str] = [
+        f"• {t('question_label', lang, n=question_ordinal)}",
+        f"  — {t('coverage_score_label', lang, score=r.score)}",
+    ]
     if r.covered_elements:
-        lines.append(f"  — покрыто: {_truncate_block('; '.join(r.covered_elements), 1000)}")
+        lines.append(f"  — {t('covered_label', lang)}: {_truncate_block('; '.join(r.covered_elements), 1000)}")
     if r.partial_elements:
-        lines.append(f"  — частично: {_truncate_block('; '.join(r.partial_elements), 1000)}")
+        lines.append(f"  — {t('partial_label', lang)}: {_truncate_block('; '.join(r.partial_elements), 1000)}")
     if r.missing_elements:
-        lines.append(f"  — пропущено: {_truncate_block('; '.join(r.missing_elements), 1000)}")
+        lines.append(f"  — {t('missing_label', lang)}: {_truncate_block('; '.join(r.missing_elements), 1000)}")
     if (r.general_comment or "").strip():
-        lines.append(f"  — вывод: {_truncate_block(r.general_comment, 900)}")
+        lines.append(f"  — {t('conclusion_label', lang)}: {_truncate_block(r.general_comment, 900)}")
     return lines
 
 
@@ -128,6 +133,10 @@ def _mean_formula_similarity(scores: list[float], mean: float) -> str:
     parts = " + ".join(f"{s:.4f}" for s in scores)
     n = len(scores)
     return f"({parts}) / {n} = {mean:.4f}"
+
+
+def _reply_language(text: str | None, fallback: str | None = None) -> str:
+    return detect_message_language(text, fallback=fallback or "ru")
 
 
 def _expected_question_count_from_registration(
@@ -186,46 +195,18 @@ def _has_meaningful_answer_text(text: str | None) -> bool:
     return len(tokens) >= 6 or len(cleaned) >= 30
 
 
-def _pending_progress_message(answered_count: int, target_count: int, completion_seen: bool) -> str:
-    base = f"Принял часть ответа: {answered_count} из {target_count}."
+def _pending_progress_message(answered_count: int, target_count: int, completion_seen: bool, lang: str) -> str:
     if completion_seen:
-        return (
-            f"{base} Фраза «Ответ закончен» учтена только как возможная граница между частями, "
-            "но оценка будет после получения всех ответов по билету."
-        )
-    return f"{base} Жду продолжение по следующим вопросам."
+        return t("pending_progress_completion", lang, answered=answered_count, target=target_count)
+    return t("pending_progress_wait", lang, answered=answered_count, target=target_count)
 
 
-def _transcription_too_short_message() -> str:
-    return (
-        "Распознано слишком мало текста из аудиозаписи, поэтому бот не может надёжно определить ответы по вопросам. "
-        "Пришлите аудио ещё раз или отправьте ответ текстом."
-    )
+def _transcription_too_short_message(lang: str) -> str:
+    return t("transcription_too_short", lang)
 
 
-def _preview_recognized_text(
-    transcript: str,
-    parts: dict[str, str],
-    questions: list[QuestionRecord],
-    *,
-    max_len: int = 1200,
-) -> str:
-    """Фрагменты с подписью ключа вопроса; при отсутствии непустых фрагментов — исходный транскрипт."""
-    chunks: list[str] = []
-    for q in questions:
-        seg = (parts.get(q.question_key) or "").strip()
-        if seg:
-            title = (q.question_text or "").strip() or q.question_key
-            chunks.append(f"{title}\n{seg}")
-    if len(chunks) >= 2:
-        text = "\n\n".join(chunks)
-    elif len(chunks) == 1:
-        text = chunks[0]
-    else:
-        text = transcript.strip()
-    if len(text) > max_len:
-        return text[:max_len] + "…"
-    return text
+def _preliminary_disclaimer(lang: str) -> str:
+    return t("preliminary_disclaimer", lang)
 
 
 async def _candidate_questions_for_transcript(
@@ -357,6 +338,19 @@ def _is_start_command(text: str | None) -> bool:
     return head == "/start" or head.startswith("/start@")
 
 
+def _is_new_command(text: str | None) -> bool:
+    if not text:
+        return False
+    t_norm = _normalize_user_text(text)
+    if _NEW_RE.match(t_norm):
+        return True
+    parts = t_norm.split()
+    if not parts:
+        return False
+    head = parts[0].lower()
+    return head == "/new" or head.startswith("/new@")
+
+
 async def _evaluate_and_reply(
     chat_id: int,
     transcript: str,
@@ -368,13 +362,14 @@ async def _evaluate_and_reply(
     telegram_message_id: int | None = None,
     ticket_number: str | None = None,
     expected_question_count: int | None = None,
+    reply_language: str = "ru",
 ) -> None:
     """Сегментация по кандидатным вопросам и оценка каждого непустого фрагмента."""
     cleaned = strip_embedded_bot_output((transcript or "").strip())
     if not cleaned:
         await telegram_client.send_message(
             chat_id,
-            "Не удалось получить текст ответа для оценки. Пришлите ответ ещё раз.",
+            t("cant_get_text_for_scoring", reply_language),
         )
         return
     transcript = cleaned
@@ -382,7 +377,7 @@ async def _evaluate_and_reply(
     if not transcript_for_scoring.strip():
         await telegram_client.send_message(
             chat_id,
-            "Пока распозналась только служебная фраза о завершении ответа. Пришлите содержательный ответ.",
+            t("only_completion_phrase", reply_language),
         )
         return
 
@@ -394,14 +389,14 @@ async def _evaluate_and_reply(
     except ValueError as e:
         await telegram_client.send_message(
             chat_id,
-            f"Ошибка настроек таблиц/эталонов: {telegram_client.redact_secrets(str(e))}",
+            t("config_error", reply_language, details=telegram_client.redact_secrets(str(e))),
         )
         return
 
     if not bank:
         await telegram_client.send_message(
             chat_id,
-            "Нет эталонов: настройте Google Sheet и ключ, либо MVP_REFERENCES_JSON / MVP_REFERENCE_ANSWER в .env.",
+            t("no_references", reply_language),
         )
         return
 
@@ -411,13 +406,14 @@ async def _evaluate_and_reply(
         expected_count=expected_question_count,
     )
     logger.info(
-        "Кандидатные вопросы (%d): %s | транскрипт (%.120s…)",
+        "Кандидатные вопросы (%d): %s | transcript_len=%d",
         len(questions),
         [q.question_key for q in questions],
-        transcript,
+        len(transcript or ""),
     )
+    logger.debug("Транскрипт (полный): %s", transcript)
     if not questions:
-        await telegram_client.send_message(chat_id, "Не удалось подобрать вопросы для оценки по текущему ответу.")
+        await telegram_client.send_message(chat_id, t("no_questions_match", reply_language))
         return
 
     parts, notes = await segmentation_service.segment_with_fallback(
@@ -435,15 +431,15 @@ async def _evaluate_and_reply(
     has_openai = bool((settings.openai_api_key or "").strip())
     if not has_openai:
         lines = [
-            "Оценка недоступна: в .env задайте OPENAI_API_KEY.",
-            "Без ключа нельзя ни оценку по покрытию смысловых элементов, ни семантическое сравнение по эмбеддингам.",
+            t("scoring_unavailable_1", reply_language),
+            t("scoring_unavailable_2", reply_language),
         ]
         if notes:
             lines.append("")
-            lines.append("Примечание:")
+            lines.append(t("note_label", reply_language))
             lines.extend(notes)
         lines.append("")
-        lines.append("Полный транскрибированный ответ:")
+        lines.append(t("full_transcript_label", reply_language))
         lines.append(_truncate_block(transcript, 3500))
         await telegram_client.send_message(chat_id, "\n".join(lines))
         return
@@ -456,7 +452,7 @@ async def _evaluate_and_reply(
 
     lines: list[str] = []
 
-    lines.append("Полный транскрибированный ответ:")
+    lines.append(t("full_transcript_label", reply_language))
     lines.append(_truncate_block(transcript, max_len=3500))
     lines.append("")
 
@@ -478,38 +474,54 @@ async def _evaluate_and_reply(
             try:
                 r = await evaluation_service.evaluate_coverage(seg_eval, ref)
             except (ValueError, RuntimeError) as e:
-                lines.append(f"• Вопрос {question_ordinal}: ошибка оценки: {e}")
-                first_answer = False
+                lines.append(
+                    t(
+                        "question_error",
+                        reply_language,
+                        question=t("question_label", reply_language, n=question_ordinal),
+                        details=str(e),
+                    ),
+                )
                 continue
-            lines.extend(_coverage_lines(question_ordinal, r))
+            lines.extend(_coverage_lines_localized(question_ordinal, r, reply_language))
             totals_100.append(r.score)
             scored.append((key, str(r.score), seg, _coverage_rationale_for_sheet(r)))
         else:
             try:
                 sim = await evaluation_service.evaluate_similarity(seg_eval, ref)
             except ValueError as e:
-                lines.append(f"• Вопрос {question_ordinal}: ошибка оценки: {e}")
-                first_answer = False
+                lines.append(
+                    t(
+                        "question_error",
+                        reply_language,
+                        question=t("question_label", reply_language, n=question_ordinal),
+                        details=str(e),
+                    ),
+                )
                 continue
-            lines.append(f"• Вопрос {question_ordinal}")
-            lines.append(f"  — сходство: {sim:.4f}")
+            lines.append(f"• {t('question_label', reply_language, n=question_ordinal)}")
+            lines.append(f"  — {t('similarity_label', reply_language, score=f'{sim:.4f}')}")
             sim_scores.append(sim)
             scored.append((key, f"{sim:.4f}", seg, ""))
 
     if use_coverage and totals_100:
         mean_r = sum(totals_100) / len(totals_100)
         lines.append("")
-        lines.append("Средняя оценка по вопросам:")
+        lines.append(t("average_label", reply_language))
         lines.append(_mean_formula_100(totals_100, mean_r))
     elif not use_coverage and len(sim_scores) >= 1:
         mean = sum(sim_scores) / len(sim_scores)
         lines.append("")
+        lines.append(t("average_label", reply_language))
         lines.append(_mean_formula_similarity(sim_scores, mean))
 
     if notes:
         lines.append("")
-        lines.append("Примечание:")
+        lines.append(t("note_label", reply_language))
         lines.extend(notes)
+    if scored:
+        lines.append("")
+        lines.append(_preliminary_disclaimer(reply_language))
 
     await telegram_client.send_message(chat_id, "\n".join(lines))
 
@@ -533,21 +545,19 @@ async def _handle_answer_payload(
     raw_text: str,
     *,
     telegram_message_id: int | None = None,
+    reply_language: str = "ru",
 ) -> None:
     previous_pending = sess.pending_transcript
     normalized = strip_embedded_bot_output((raw_text or "").strip())
     if not normalized:
-        await telegram_client.send_message(chat_id, "Не удалось получить текст ответа. Пришлите его ещё раз.")
+        await telegram_client.send_message(chat_id, t("cant_get_text_again", reply_language))
         return
-    logger.info(
-        "incoming transcript: len=%d preview=%.120r",
-        len(normalized),
-        normalized,
-    )
+    logger.info("incoming transcript: len=%d", len(normalized))
+    logger.debug("incoming transcript (полный): %r", normalized)
     if not _has_meaningful_answer_text(normalized):
         sess.pending_transcript = previous_pending
         sess.last_transcript = previous_pending
-        await telegram_client.send_message(chat_id, _transcription_too_short_message())
+        await telegram_client.send_message(chat_id, _transcription_too_short_message(reply_language))
         return
 
     tn = extract_ticket_number(normalized)
@@ -565,14 +575,14 @@ async def _handle_answer_payload(
     except ValueError as e:
         await telegram_client.send_message(
             chat_id,
-            f"Ошибка настроек таблиц/эталонов: {telegram_client.redact_secrets(str(e))}",
+            t("config_error", reply_language, details=telegram_client.redact_secrets(str(e))),
         )
         return
 
     if not bank:
         await telegram_client.send_message(
             chat_id,
-            "Нет эталонов: настройте Google Sheet и ключ, либо MVP_REFERENCES_JSON / MVP_REFERENCE_ANSWER в .env.",
+            t("no_references", reply_language),
         )
         return
 
@@ -608,7 +618,7 @@ async def _handle_answer_payload(
     if answered_count < target_count:
         await telegram_client.send_message(
             chat_id,
-            _pending_progress_message(answered_count, target_count, completion_seen),
+            _pending_progress_message(answered_count, target_count, completion_seen, reply_language),
         )
         return
 
@@ -622,6 +632,7 @@ async def _handle_answer_payload(
         telegram_message_id=telegram_message_id,
         ticket_number=sess.ticket_number,
         expected_question_count=expected_count,
+        reply_language=reply_language,
     )
     sess.pending_transcript = None
 
@@ -632,13 +643,14 @@ async def _handle_voice_answering(
     user_id: int,
     message: dict[str, Any],
 ) -> None:
+    reply_language = bot_texts.normalize_lang(sess.language or "ru")
     voice = message.get("voice")
     if not isinstance(voice, dict):
-        await telegram_client.send_message(chat_id, "Нет голосового вложения.")
+        await telegram_client.send_message(chat_id, t("no_voice_attachment", reply_language))
         return
     file_id = voice.get("file_id")
     if not isinstance(file_id, str):
-        await telegram_client.send_message(chat_id, "Не удалось получить file_id голосового.")
+        await telegram_client.send_message(chat_id, t("no_voice_file_id", reply_language))
         return
 
     try:
@@ -659,12 +671,13 @@ async def _handle_voice_answering(
             user_id,
             raw_tr,
             telegram_message_id=msg_id,
+            reply_language=reply_language,
         )
     except Exception as e:  # noqa: BLE001
         logger.exception("Ошибка конвейера голоса")
         await telegram_client.send_message(
             chat_id,
-            f"Ошибка обработки голоса: {telegram_client.redact_secrets(str(e))}",
+            t("voice_processing_error", reply_language, details=telegram_client.redact_secrets(str(e))),
         )
 
 
@@ -705,9 +718,12 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
     text = _normalize_user_text(text or "")
     has_voice = bool(message.get("voice"))
     start_cmd = _is_start_command(text)
+    new_cmd = _is_new_command(text)
+    existing_session = await session_service.get_session(user_id)
+    reply_language = _reply_language(text, fallback=(existing_session.language if existing_session else "ru"))
 
-    if start_cmd:
-        logger.info("Команда /start: user_id=%s chat_id=%s", user_id, chat_id)
+    if start_cmd or new_cmd:
+        logger.info("Команда reset (%s): user_id=%s chat_id=%s", "/start" if start_cmd else "/new", user_id, chat_id)
         sess = await session_service.reset_session(user_id)
         sess.start_time = time.monotonic()
         out = fsm_service.process_message(
@@ -715,26 +731,29 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
             text=text,
             has_voice=has_voice,
             is_start_command=True,
+            reply_language=reply_language,
+            include_welcome=True,
         )
         await session_service.upsert_session(out.session)
         for line in out.messages:
             await telegram_client.send_message(chat_id, line)
         return
 
-    sess = await session_service.get_session(user_id)
+    sess = existing_session
     if sess is None:
         sess = ExamSession(user_id=user_id)
         logger.info("Новая сессия (не было в памяти): user_id=%s state=%s", user_id, sess.state.value)
     else:
         logger.info(
-            "Сессия из памяти: user_id=%s state=%s text=%.60r",
-            user_id, sess.state.value, text,
+            "Сессия из памяти: user_id=%s state=%s text_len=%d",
+            user_id, sess.state.value, len(text or ""),
         )
+        logger.debug("Сессия из памяти: user_id=%s text=%r", user_id, text)
 
     if session_service.is_timed_out(sess) and sess.state != ExamState.FINISH:
         await telegram_client.send_message(
             chat_id,
-            "Время экзамена истекло (2 часа с команды /start). Отправьте /start, чтобы начать заново.",
+            t("timeout_restart", reply_language),
         )
         sess.state = ExamState.FINISH
         await session_service.upsert_session(sess)
@@ -750,6 +769,7 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
         text=text,
         has_voice=has_voice,
         is_start_command=False,
+        reply_language=reply_language,
     )
     logger.info(
         "FSM → state=%s msgs=%d evaluate=%s user_id=%s",
@@ -772,6 +792,7 @@ async def handle_telegram_update(update: dict[str, Any]) -> None:
             user_id,
             raw_eval,
             telegram_message_id=msg_id,
+            reply_language=reply_language,
         )
 
     await session_service.upsert_session(out.session)
