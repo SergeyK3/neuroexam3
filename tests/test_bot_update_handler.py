@@ -276,6 +276,9 @@ async def test_evaluate_and_reply_shows_full_transcript_without_key_lines(monkey
     monkeypatch.setattr("app.services.evaluation_service.use_coverage_scoring", lambda: True)
     monkeypatch.setattr("app.services.evaluation_service.evaluate_coverage", fake_coverage)
     monkeypatch.setattr("app.services.results_export_service.export_question_scores", fake_export)
+    # Без OPENAI_API_KEY хендлер уходит в ветку «Оценка недоступна».
+    # Сам ключ не используется (evaluate_coverage уже замокан), нужен только непустой флаг.
+    monkeypatch.setattr(bot_update_handler.settings, "openai_api_key", "test-key")
 
     await bot_update_handler._evaluate_and_reply(
         1,

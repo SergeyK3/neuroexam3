@@ -29,3 +29,4 @@ redis>=5.0.0
 pytest>=8.0.0
 pytest-asyncio>=0.23.0
 httpx>=0.27.0            # also used as async test client
+fakeredis>=2.20.0        # in-process Redis для test_redis_store_* (без реального брокера в CI)
