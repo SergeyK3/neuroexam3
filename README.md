@@ -1,10 +1,11 @@
 # NeuroExam3
 
-Сервис на **Python 3.12** и **FastAPI**: экзамен в **Telegram** (текст и голос), распознавание речи (OpenAI Whisper), сегментация ответа по ключам вопроса, сравнение с эталонами и оценка **0…1**. Эталоны — из **Google Sheets** или fallback из `.env`; результаты при настроенных таблицах дописываются на лист результатов.
+Сервис на **Python 3.12** и **FastAPI**: экзамен в **Telegram** (текст и голос), распознавание речи (OpenAI Whisper), сегментация ответа по ключам вопроса, сравнение с эталонами и предварительная оценка. Основной режим оценки сейчас: **coverage / rubric** (покрытие смысловых элементов, `0…100`), резервный режим: **similarity** (`0…1`). Эталоны — из **Google Sheets** или fallback из `.env`; результаты при настроенных таблицах дописываются на лист результатов.
 
 Дополнительно есть REST **`/exam/*`** для ручной проверки STT и оценки без Telegram.
 
 Канонический порядок развития MVP: **[docs/01-architecture.md](docs/01-architecture.md)** (раздел «11. Порядок внедрения MVP»).
+Канонические правила поведения бота по отношению к студенту: **[docs/ai_behavior_spec.md](docs/ai_behavior_spec.md)**.
 
 ---
 
@@ -24,7 +25,7 @@
 | Очередь Redis (arq), фоновая обработка вебхука | `app/workers/` |
 | Настройки | `app/core/config.py`, `.env` |
 
-Черновик `app/bot/bot.py` к основному сценарию **не относится** — бот работает через **webhook**.
+Основной сценарий бота работает через **webhook**; отдельный polling-бот в репозитории не используется.
 
 ---
 
@@ -39,7 +40,7 @@ neuroexam3/
 ├── .github/workflows/ci.yml
 ├── docker-compose.yml         # web + redis + worker (всё в контейнерах)
 ├── docker-compose.redis.yml   # только Redis для dev на хосте
-├── docs/                    # бриф, архитектура, модель поставки
+├── docs/                    # бриф, архитектура, модель поставки, поведение бота
 └── app/
     ├── api/
     │   ├── routes.py        # /exam/evaluate-text, /exam/evaluate-voice
@@ -79,7 +80,15 @@ uvicorn main:app --reload --port 8000
 | Переменная | Назначение |
 |------------|------------|
 | `TELEGRAM_BOT_TOKEN` | Токен бота от [@BotFather](https://t.me/BotFather) |
-| `TELEGRAM_WEBHOOK_SECRET` | Опционально: тот же секрет, что при `setWebhook(secret_token=...)`; иначе вебхук без проверки заголовка |
+| `TELEGRAM_WEBHOOK_SECRET` | Секрет, передаваемый в `setWebhook(secret_token=...)`. В проде — **обязателен** (см. `REQUIRE_WEBHOOK_SECRET`) |
+| `REQUIRE_WEBHOOK_SECRET` | По умолчанию `true`: при заданном `TELEGRAM_BOT_TOKEN` без `TELEGRAM_WEBHOOK_SECRET` приложение не запустится. Для локальной разработки/тестов: `false` |
+| `API_BEARER_TOKEN` | Bearer-токен для `/exam/evaluate-*`. Пустое значение → эндпоинты отключены (HTTP 503). Нужно для внешних тестов без Telegram |
+| `MAX_UPDATE_BYTES` | Жёсткий лимит тела webhook Telegram (default `262144` = 256 КБ) |
+| `MAX_AUDIO_BYTES` | Лимит входящего аудио для `/exam/evaluate-voice` (default `20971520` = 20 МБ) |
+| `MAX_TEXT_CHARS` | Лимит текста в `/exam/evaluate-*` (default `32000`) |
+| `MAX_STUDENT_ANSWER_FOR_LLM` | Текст ответа студента усекается до этого размера **перед** отправкой в LLM (default `8000`) |
+| `ARQ_MAX_JOBS` | Параллелизм воркера arq (default `8`). Раньше было `1` — это искусственно сериализовывало студентов |
+| `ARQ_JOB_TIMEOUT` | Таймаут обработки одного апдейта в воркере, сек (default `180`) |
 | `OPENAI_API_KEY` | Whisper и при `MVP_SEGMENTATION_USE_LLM=true` — сегментация через LLM |
 | `SPEECH_MODEL` | Обычно `whisper-1` |
 | `GOOGLE_SHEETS_CREDENTIALS` или `GOOGLE_APPLICATION_CREDENTIALS` | Путь к JSON сервисного аккаунта Google |
@@ -91,12 +100,23 @@ uvicorn main:app --reload --port 8000
 | `MVP_QUESTION_KEY`, `MVP_REFERENCE_ANSWER` | Один эталон без JSON |
 | `MVP_REFERENCES_JSON` | Несколько ключей: `{"Q1":"эталон",...}` |
 | `MVP_SEGMENTATION_USE_LLM` | `true` — при неудачной эвристической сегментации пробовать разбиение через OpenAI |
-| `REDIS_URL` | Если задан (например `redis://localhost:6379/0`), вебхук Telegram **только ставит задачу** в очередь; обработку выполняет отдельный процесс `arq` (см. ниже). Если пусто — как раньше, обработка в процессе uvicorn |
+| `REDIS_URL` | Если задан (например `redis://localhost:6379/0`), вебхук Telegram **только ставит задачу** в очередь `arq` **и** сессии студентов переезжают в Redis (переживают рестарт). Если пусто — синхронная обработка, сессии в памяти процесса |
 | `HOST`, `PORT`, `DEBUG` | Сервер uvicorn (см. `app/core/config.py`) |
+
+### Безопасность и надёжность (коротко)
+
+- `/exam/evaluate-*` закрыты Bearer-токеном (`API_BEARER_TOKEN`), иначе возвращают `503`.
+- Webhook Telegram требует `TELEGRAM_WEBHOOK_SECRET` в `production` (`REQUIRE_WEBHOOK_SECRET=true`).
+- Размеры запросов ограничены (`MAX_UPDATE_BYTES`, `MAX_AUDIO_BYTES`, `MAX_TEXT_CHARS`).
+- Ответ студента усекается до `MAX_STUDENT_ANSWER_FOR_LLM` и оборачивается в `<reference>`/`<student_answer>` с экранированием угловых скобок — для защиты от prompt injection.
+- Google Sheets: при создании нового листа добавляется колонка `Dedup Key` (идемпотентный append). Существующие листы из 11 колонок продолжают работать.
+- Логи: токен бота и ключи OpenAI маскируются; ФИО и номер группы маскируются в production (при `DEBUG=false`).
 
 ---
 
 ## Telegram: вебхук
+
+Пользовательское поведение бота (`/start`, `/new`, локализация ответов, отказ в подсказках, обязательный дисклеймер к оценке) описано в **`docs/ai_behavior_spec.md`**. Этот раздел ниже покрывает только техническую настройку webhook.
 
 1. Приложение должно быть доступно по **HTTPS** (деплой или туннель: ngrok, cloudflare tunnel и т.д.).
 2. Путь у приложения фиксированный: **`/telegram/webhook`** (см. `app/api/telegram_webhook.py`). Полный адрес для Telegram всегда: **`https://<публичный-домен>/telegram/webhook`**.
@@ -168,9 +188,12 @@ Telegram шлёт `POST` с заголовком `X-Telegram-Bot-Api-Secret-Toke
 
 ```bash
 curl -X POST http://localhost:8000/exam/evaluate-text \
+     -H "Authorization: Bearer $API_BEARER_TOKEN" \
      -F "student_answer=Ответ студента" \
      -F "reference=Эталонный ответ"
 ```
+
+Без заголовка `Authorization` при заданном `API_BEARER_TOKEN` сервер вернёт `401`, при пустом `API_BEARER_TOKEN` — `503`.
 
 ---
 
@@ -253,6 +276,13 @@ docker run --rm -p 8000:8000 --env-file .env neuroexam3
 
 ---
 
+## Документы-источники
+
+- `docs/ai_behavior_spec.md` — канонические правила поведения Telegram-бота.
+- `docs/00-project_brief.md` — бизнес-цели и проектные ограничения.
+- `docs/01-architecture.md` — архитектурные инварианты и порядок внедрения MVP.
+- `docs/02-delivery-model.md` — модель ведения проекта по этапам.
+
 ## Расширение логики
 
-Точки замены: **`speech_service.transcribe`**, **`evaluation_service.evaluate`**, правила FSM — **`fsm_service`**. Подробные инварианты и сценарий — в **`docs/`**.
+Точки замены: **`speech_service.transcribe`**, **`evaluation_service.evaluate`**, правила FSM — **`fsm_service`**. Подробные инварианты, сценарий и пользовательские правила — в **`docs/`**.

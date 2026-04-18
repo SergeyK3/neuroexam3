@@ -58,6 +58,33 @@ def test_english_language_alias():
     assert out.session.language == "en"
 
 
+def test_start_returns_welcome_and_language_prompt_in_english():
+    s = ExamSession(user_id=40)
+    out = fsm_service.process_message(
+        s,
+        text="/start",
+        has_voice=False,
+        is_start_command=True,
+        reply_language="en",
+        include_welcome=True,
+    )
+    assert len(out.messages) == 2
+    assert "deep breaths" in out.messages[0]
+    assert "choose the exam language" in out.messages[1].lower()
+
+
+def test_hint_request_gets_refusal_in_answering():
+    s = ExamSession(user_id=41, state=ExamState.ANSWERING, language="ru")
+    out = fsm_service.process_message(
+        s,
+        text="Подскажи правильный ответ, пожалуйста",
+        has_voice=False,
+        is_start_command=False,
+    )
+    assert out.evaluate_text is None
+    assert "не могу" in out.messages[0].lower()
+
+
 def test_registration_accumulates_over_messages():
     s = ExamSession(user_id=5, state=ExamState.REGISTRATION, language="ru")
     out = fsm_service.process_message(s, text="Информатика в медицине", has_voice=False, is_start_command=False)

@@ -35,7 +35,8 @@ def test_coverage_json_to_scores_counts_weights():
     assert "вывод" in s.general_comment.lower()
 
 
-def test_coverage_json_to_scores_partial_answer_not_below_65():
+def test_coverage_json_to_scores_dynamic_floor_for_weak_answer():
+    """Слабый ответ (1 partial + 2 missing): coverage_ratio=1/6, пол динамический, не фиксированный 65."""
     parsed = CoverageJson.model_validate(
         {
             "elements": [
@@ -46,7 +47,9 @@ def test_coverage_json_to_scores_partial_answer_not_below_65():
         }
     )
     s = _coverage_json_to_scores(parsed)
-    assert s.score == 65
+    # weighted=0.5, total=3 → raw=round(50 + 50/6)=58, dynamic_floor=round(45 + 20/6)=48 → max(58, 48) = 58
+    assert s.score == 58
+    assert s.score < 65, "Жёсткий пол 65 удалён; слабый ответ не должен искусственно подтягиваться"
 
 
 def test_coverage_json_to_scores_breadth_bonus_for_substantial_answer():
