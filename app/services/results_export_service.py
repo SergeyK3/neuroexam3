@@ -174,14 +174,23 @@ async def export_question_scores(
         telegram_message_id=telegram_message_id,
         ticket_number=ticket_number or "",
     )
+    dedup_key = f"{telegram_user_id}:{session_id or '-'}:{telegram_message_id if telegram_message_id is not None else '-'}"
     try:
-        await asyncio.to_thread(
+        appended = await asyncio.to_thread(
             sheets_client.append_with_retries,
             sheet_id,
             tab,
             credentials_path=creds,
             row=row,
+            dedup_key=dedup_key,
         )
+        if not appended:
+            logger.info(
+                "Sheets: пропущена запись по dedup_key=%s (уже есть в листе %s/%s)",
+                dedup_key,
+                sheet_id,
+                tab,
+            )
     except Exception:
         logger.exception(
             "Не удалось записать результат в Sheets %s / %s",

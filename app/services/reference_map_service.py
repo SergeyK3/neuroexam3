@@ -575,7 +575,11 @@ async def select_relevant_questions_async(
         return lexical_shortlist[:take]
 
     explicit_keys = _extract_explicit_keys(transcript)
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        timeout=30.0,
+        max_retries=2,
+    )
     model = (settings.mvp_embedding_model or "text-embedding-3-small").strip() or "text-embedding-3-small"
     payload = [transcript.strip()] + [
         f"{q.question_text}\n{q.reference_answer[:700]}".strip() for q in lexical_shortlist

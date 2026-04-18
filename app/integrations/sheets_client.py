@@ -280,7 +280,9 @@ async def fetch_question_bank(
     )
 
 
-# Лист результатов: шапка как в операционной таблице кафедры (A–J). Одна строка = один оценённый ключ вопроса.
+# Лист результатов: шапка как в операционной таблице кафедры (A–K). Одна строка = один оценённый ключ вопроса.
+# Столбец "Dedup Key" (L) — опциональный: добавляется при создании нового листа.
+# Существующие листы с 11 колонками продолжают работать как раньше.
 _RESULT_HEADER = (
     "ID сообщения",
     "ID в Telegram",
@@ -294,6 +296,16 @@ _RESULT_HEADER = (
     "Ответ на билет",
     "Комментарий",
 )
+_DEDUP_HEADER = "Dedup Key"
+_RESULT_HEADER_WITH_DEDUP = _RESULT_HEADER + (_DEDUP_HEADER,)
+
+
+def _find_dedup_col_idx(header_row: list[Any]) -> int | None:
+    """Возвращает 0-based индекс колонки Dedup Key в существующей шапке (или None)."""
+    for i, cell in enumerate(header_row):
+        if str(cell or "").strip().lower() == _DEDUP_HEADER.lower():
+            return i
+    return None
 
 
 def append_student_result_row_sync(
@@ -302,8 +314,15 @@ def append_student_result_row_sync(
     *,
     credentials_path: str,
     row: list[Any],
-) -> None:
-    """Добавить строку на лист результатов; при пустом листе — записать заголовок."""
+    dedup_key: str | None = None,
+    dedup_scan_limit: int = 500,
+) -> bool:
+    """Добавить строку на лист результатов; при пустом листе — записать заголовок c колонкой Dedup Key.
+
+    Идемпотентность: если `dedup_key` задан и колонка Dedup Key есть в шапке,
+    ищем точное совпадение в последних `dedup_scan_limit` строках — при совпадении
+    пропускаем запись. Возвращает True, если строка реально записана.
+    """
     from app.integrations import google_sheets
 
     cred_path = _resolve_credentials_path(credentials_path)
@@ -323,13 +342,42 @@ def append_student_result_row_sync(
 
     existing = ws.get_all_values()
     if not existing:
-        ws.append_row(list(_RESULT_HEADER))
-    elif existing[0] != list(_RESULT_HEADER):
-        logger.warning(
-            "Первая строка листа %s не совпадает с ожидаемым заголовком — строка всё равно будет добавлена",
-            worksheet_title,
-        )
-    ws.append_row(row)
+        # Новый лист — создаём сразу с колонкой Dedup Key.
+        ws.append_row(list(_RESULT_HEADER_WITH_DEDUP))
+        header = list(_RESULT_HEADER_WITH_DEDUP)
+    else:
+        header = existing[0]
+        if list(header)[: len(_RESULT_HEADER)] != list(_RESULT_HEADER):
+            logger.warning(
+                "Первая строка листа %s не совпадает с ожидаемым заголовком — строка всё равно будет добавлена",
+                worksheet_title,
+            )
+
+    dedup_idx = _find_dedup_col_idx(header)
+
+    # Проверяем дубликат только если у нас есть ключ и колонка для него.
+    if dedup_key and dedup_idx is not None and len(existing) > 1:
+        start = max(1, len(existing) - dedup_scan_limit)
+        for prev in existing[start:]:
+            if dedup_idx < len(prev) and prev[dedup_idx] == dedup_key:
+                logger.info(
+                    "Sheets append: duplicate dedup_key detected, skipping append (worksheet=%s)",
+                    worksheet_title,
+                )
+                return False
+
+    # Если в шапке есть колонка Dedup Key — дописываем ключ в соответствующую позицию.
+    row_out = list(row)
+    if dedup_idx is not None:
+        while len(row_out) < dedup_idx:
+            row_out.append("")
+        if len(row_out) == dedup_idx:
+            row_out.append(dedup_key or "")
+        else:
+            row_out[dedup_idx] = dedup_key or ""
+
+    ws.append_row(row_out)
+    return True
 
 
 async def append_student_result_row(
@@ -338,13 +386,15 @@ async def append_student_result_row(
     *,
     credentials_path: str,
     row: list[Any],
-) -> None:
-    await asyncio.to_thread(
+    dedup_key: str | None = None,
+) -> bool:
+    return await asyncio.to_thread(
         append_student_result_row_sync,
         spreadsheet_id,
         worksheet_title,
         credentials_path=credentials_path,
         row=row,
+        dedup_key=dedup_key,
     )
 
 
@@ -424,22 +474,27 @@ def append_with_retries(
     *,
     credentials_path: str,
     row: list[Any],
+    dedup_key: str | None = None,
     max_attempts: int = 3,
-) -> None:
-    """Синхронная запись с коротким retry (идемпотентность — на стороне вызывающего)."""
+) -> bool:
+    """Синхронная запись с retry и поддержкой dedup_key.
+
+    Возвращает True, если строка реально была добавлена; False, если пропущено как дубликат.
+    """
     last: Exception | None = None
     for attempt in range(max_attempts):
         try:
-            append_student_result_row_sync(
+            return append_student_result_row_sync(
                 spreadsheet_id,
                 worksheet_title,
                 credentials_path=credentials_path,
                 row=row,
+                dedup_key=dedup_key,
             )
-            return
         except Exception as e:
             last = e
             logger.warning("append_student_result attempt %s/%s: %s", attempt + 1, max_attempts, e)
             time.sleep(0.4 * (attempt + 1))
     if last:
         raise last
+    return False
