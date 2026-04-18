@@ -1,7 +1,11 @@
+import os
+
+os.environ.setdefault("REQUIRE_WEBHOOK_SECRET", "false")
+
 import pytest
 
 from app.core.config import settings
-from app.services import reference_map_service
+from app.services import reference_map_service, session_service
 from main import app
 
 
@@ -16,6 +20,14 @@ def _clear_reference_cache():
 def _tests_without_redis_queue(monkeypatch):
     """CI и локальные тесты без Redis: вебхук обрабатывает Update синхронно."""
     monkeypatch.setattr(settings, "redis_url", "", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_store():
+    """In-memory store не должен протекать между тестами."""
+    session_service.reset_store_for_tests(None)
+    yield
+    session_service.reset_store_for_tests(None)
 
 
 @pytest.fixture(autouse=True)

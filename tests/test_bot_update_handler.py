@@ -290,4 +290,6 @@ async def test_evaluate_and_reply_shows_full_transcript_without_key_lines(monkey
     assert "Полный транскрибированный ответ:" in sent[0]
     assert "Ключ вопроса:" not in sent[0]
     assert "Средняя оценка по вопросам:" in sent[0]
+    assert "Это предварительная оценка." in sent[0]
+    assert "Окончательную оценку выставляет преподаватель." in sent[0]
     assert exported

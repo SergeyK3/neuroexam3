@@ -22,6 +22,8 @@ google-auth>=2.29.0
 
 # Очередь задач (Redis + arq) — опционально, см. REDIS_URL в .env
 arq>=0.26.0
+# Асинхронный клиент Redis для SessionStore (сессии экзамена переживают рестарт)
+redis>=5.0.0
 
 # Testing
 pytest>=8.0.0

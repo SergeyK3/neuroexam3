@@ -5,8 +5,11 @@ import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
+from pydantic import ValidationError
 
+from app.api.deps import enforce_max_body
 from app.core.config import settings
+from app.models.telegram import TgUpdate
 from app.services.bot_update_handler import handle_telegram_update
 
 JOB_NAME = "process_telegram_update"
@@ -30,6 +33,8 @@ def _secret_matches(expected: str, received: str | None) -> bool:
 @router.post("/webhook")
 async def telegram_webhook(request: Request) -> dict[str, bool]:
     """Accept a Telegram `Update` (JSON). Validates webhook secret when configured."""
+    enforce_max_body(request, settings.max_update_bytes)
+
     if settings.telegram_webhook_secret:
         received = request.headers.get(_TELEGRAM_SECRET_HEADER)
         if not _secret_matches(settings.telegram_webhook_secret, received):
@@ -50,15 +55,18 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
     if not isinstance(update, dict):
         raise HTTPException(status_code=400, detail="Update must be a JSON object")
 
-    update_id = update.get("update_id")
-    if update_id is None:
-        raise HTTPException(status_code=400, detail="Missing update_id")
+    # Строгая валидация входа: отсеиваем битые/посторонние payload'ы до постановки в очередь.
+    try:
+        validated = TgUpdate.from_raw(update)
+    except ValidationError as e:
+        logger.warning("Telegram webhook: schema validation failed (%d issues)", len(e.errors()))
+        raise HTTPException(status_code=400, detail="Invalid Telegram Update schema") from None
 
-    logger.debug("Telegram update_id=%s keys=%s", update_id, list(update.keys()))
+    logger.debug("Telegram update_id=%s", validated.update_id)
 
     pool = getattr(request.app.state, "arq_pool", None)
     if pool is not None:
-        await pool.enqueue_job(JOB_NAME, update, _job_id=f"tg-{update_id}")
+        await pool.enqueue_job(JOB_NAME, update, _job_id=f"tg-{validated.update_id}")
     else:
         await handle_telegram_update(update)
     return {"ok": True}

@@ -10,12 +10,14 @@ import logging
 from arq.connections import RedisSettings
 
 from app.core.config import settings
+from app.core.logging_filters import install_filters
 
 # Процесс arq не импортирует main.py — иначе logger.info из приложения не виден в консоли.
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
+install_filters(debug=settings.debug)
 
 from app.workers.jobs import process_telegram_update
 
@@ -30,4 +32,7 @@ def _redis() -> RedisSettings:
 class WorkerSettings:
     functions = [process_telegram_update]
     redis_settings = _redis()
-    max_jobs = 1
+    # Параллелизм: несколько студентов одновременно обрабатываются отдельными задачами.
+    # Внутри задачи — последовательная работа по user_id; дедупликация записи в Sheets по dedup_key.
+    max_jobs = int(getattr(settings, "arq_max_jobs", 8) or 8)
+    job_timeout = int(getattr(settings, "arq_job_timeout", 180) or 180)

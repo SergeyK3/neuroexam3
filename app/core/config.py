@@ -6,7 +6,7 @@ import logging
 import os
 import unicodedata
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
@@ -53,11 +53,39 @@ class Settings(BaseSettings):
     # Очередь: при непустом REDIS_URL вебхук Telegram ставит задачу в Redis (нужен процесс arq)
     redis_url: str = ""
 
+    # Параллелизм воркера arq (п.4.1/4.3 AGENTS: многопользовательская работа)
+    arq_max_jobs: int = 8
+    arq_job_timeout: int = 180
+
+    # Периметр безопасности: ключ для публичных /exam/* эндпоинтов (Bearer).
+    # Пустое значение — эндпоинты отключены (503).
+    api_bearer_token: str = ""
+    # Жёсткие лимиты входящих данных (DoS + контроль расходов OpenAI)
+    max_update_bytes: int = 256 * 1024
+    max_audio_bytes: int = 20 * 1024 * 1024
+    max_text_chars: int = 32_000
+    max_student_answer_for_llm: int = 8_000
+    # В продакшене секрет вебхука Telegram обязателен. False только для тестов/локальной отладки.
+    require_webhook_secret: bool = True
+
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+
+    @model_validator(mode="after")
+    def _check_webhook_secret(self) -> "Settings":
+        if (
+            self.require_webhook_secret
+            and (self.telegram_bot_token or "").strip()
+            and not (self.telegram_webhook_secret or "").strip()
+        ):
+            raise ValueError(
+                "TELEGRAM_WEBHOOK_SECRET обязателен при заданном TELEGRAM_BOT_TOKEN. "
+                "Либо задайте секрет, либо выставьте REQUIRE_WEBHOOK_SECRET=false (только для разработки).",
+            )
+        return self
 
     @field_validator(
         "mvp_references_json",

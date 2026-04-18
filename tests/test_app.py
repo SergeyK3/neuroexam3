@@ -15,10 +15,15 @@ async def test_health_endpoint():
     assert response.json() == {"status": "ok"}
 
 
+_TEST_BEARER = "test-bearer-token-value"
+_AUTH_HEADERS = {"Authorization": f"Bearer {_TEST_BEARER}"}
+
+
 @pytest.mark.asyncio
 async def test_evaluate_text_exact_match(monkeypatch):
     monkeypatch.setattr(settings, "mvp_evaluation_mode", "similarity", raising=False)
     monkeypatch.setattr(settings, "openai_api_key", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "api_bearer_token", _TEST_BEARER, raising=False)
 
     async def fake_sim(sa: str, ref: str) -> float:
         return 1.0 if sa.strip() == ref.strip() else 0.0
@@ -31,6 +36,7 @@ async def test_evaluate_text_exact_match(monkeypatch):
                 "student_answer": "The mitochondria is the powerhouse of the cell",
                 "reference": "The mitochondria is the powerhouse of the cell",
             },
+            headers=_AUTH_HEADERS,
         )
     assert response.status_code == 200
     body = response.json()
@@ -42,6 +48,7 @@ async def test_evaluate_text_exact_match(monkeypatch):
 async def test_evaluate_text_no_match(monkeypatch):
     monkeypatch.setattr(settings, "mvp_evaluation_mode", "similarity", raising=False)
     monkeypatch.setattr(settings, "openai_api_key", "sk-test", raising=False)
+    monkeypatch.setattr(settings, "api_bearer_token", _TEST_BEARER, raising=False)
 
     async def fake_sim(_sa: str, _ref: str) -> float:
         return 0.2
@@ -54,6 +61,7 @@ async def test_evaluate_text_no_match(monkeypatch):
                 "student_answer": "Wrong answer",
                 "reference": "Correct answer",
             },
+            headers=_AUTH_HEADERS,
         )
     assert response.status_code == 200
     body = response.json()
@@ -66,6 +74,7 @@ async def test_evaluate_voice_returns_transcript(monkeypatch):
     """Smoke test: the evaluate-voice endpoint returns expected keys."""
     monkeypatch.setattr(settings, "openai_api_key", "sk-test", raising=False)
     monkeypatch.setattr(settings, "mvp_evaluation_mode", "similarity", raising=False)
+    monkeypatch.setattr(settings, "api_bearer_token", _TEST_BEARER, raising=False)
 
     async def fake_sim(_sa: str, _ref: str) -> float:
         return 0.35
@@ -82,6 +91,7 @@ async def test_evaluate_voice_returns_transcript(monkeypatch):
             "/exam/evaluate-voice",
             files={"audio": ("test.wav", dummy_audio, "audio/wav")},
             data={"reference": "some reference answer"},
+            headers=_AUTH_HEADERS,
         )
     assert response.status_code == 200
     body = response.json()
@@ -180,16 +190,19 @@ async def test_telegram_webhook_start_invokes_fsm(monkeypatch):
         response = await client.post("/telegram/webhook", json=payload)
     assert response.status_code == 200
     assert response.json() == {"ok": True}
-    assert len(sent) == 1
+    assert len(sent) == 2
     assert sent[0][0] == uid
-    assert "язык" in sent[0][1].lower() or "language" in sent[0][1].lower() or "ru" in sent[0][1].lower()
+    assert "вдох" in sent[0][1].lower()
+    assert "язык" in sent[1][1].lower() or "language" in sent[1][1].lower() or "ru" in sent[1][1].lower()
 
 
 def test_start_command_recognized_after_zwsp():
-    from app.services.bot_update_handler import _is_start_command
+    from app.services.bot_update_handler import _is_new_command, _is_start_command
 
     assert _is_start_command("\u200b/start")
     assert _is_start_command("/start@SomeBot")
+    assert _is_new_command("/new")
+    assert _is_new_command("/new@SomeBot")
 
 
 @pytest.mark.asyncio
@@ -216,8 +229,9 @@ async def test_telegram_webhook_business_message_start(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/telegram/webhook", json=payload)
     assert response.status_code == 200
-    assert len(sent) == 1
-    assert "язык" in sent[0].lower()
+    assert len(sent) == 2
+    assert "вдох" in sent[0].lower()
+    assert "язык" in sent[1].lower()
 
 
 @pytest.mark.asyncio
@@ -244,7 +258,35 @@ async def test_telegram_webhook_no_session_prompts_start(monkeypatch):
         response = await client.post("/telegram/webhook", json=payload)
     assert response.status_code == 200
     assert len(sent) == 1
-    assert "start" in sent[0].lower()
+    assert sent[0].startswith("To begin")
+
+
+@pytest.mark.asyncio
+async def test_telegram_webhook_new_restarts_exam(monkeypatch):
+    monkeypatch.setattr(settings, "telegram_webhook_secret", "", raising=False)
+    sent: list[str] = []
+
+    async def fake_send(chat_id: int, text: str) -> None:
+        sent.append(text)
+
+    monkeypatch.setattr("app.integrations.telegram_client.send_message", fake_send)
+    uid = 900123
+    payload = {
+        "update_id": 13,
+        "message": {
+            "message_id": 4,
+            "date": 0,
+            "from": {"id": uid, "is_bot": False, "first_name": "U"},
+            "chat": {"id": uid, "type": "private"},
+            "text": "/new",
+        },
+    }
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/telegram/webhook", json=payload)
+    assert response.status_code == 200
+    assert len(sent) == 2
+    assert "заново" in sent[0].lower()
+    assert "язык" in sent[1].lower()
 
 
 @pytest.mark.asyncio

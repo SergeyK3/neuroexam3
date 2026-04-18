@@ -84,7 +84,12 @@ async def _transcribe_once(
     except ImportError as e:
         raise RuntimeError("Установите пакет openai: pip install openai") from e
 
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    # Whisper может обрабатывать длинные записи (до 25 МБ), поэтому таймаут больше — 120 сек.
+    client = AsyncOpenAI(
+        api_key=settings.openai_api_key,
+        timeout=120.0,
+        max_retries=2,
+    )
     buf = io.BytesIO(audio_bytes)
     buf.name = "voice.ogg"
 
