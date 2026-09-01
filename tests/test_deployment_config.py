@@ -5,6 +5,7 @@ import re
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+import yaml
 
 from main import app
 from app.core.config import Settings
@@ -34,6 +35,56 @@ def test_production_compose_is_ps_kz_isolated():
     assert "neuroexam3_internal" in compose
     assert "neuroexam3_redis_data" in compose
     assert 'ARQ_MAX_JOBS: "${ARQ_MAX_JOBS:-2}"' in compose
+
+
+def test_redis_runs_as_pinned_non_root_user_with_hardening():
+    compose = yaml.safe_load((ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8"))
+    redis = compose["services"]["redis"]
+    assert redis["user"] == "999:1000"
+    assert redis["cap_drop"] == ["ALL"]
+    assert redis["read_only"] is True
+    assert "no-new-privileges:true" in redis["security_opt"]
+    assert redis["tmpfs"] == ["/tmp:rw,noexec,nosuid,size=16m"]
+    assert "redis_data:/data" in redis["volumes"]
+    assert redis["healthcheck"]["test"] == ["CMD", "redis-cli", "ping"]
+    assert not redis.get("ports")
+
+
+def test_ci_runs_safe_compose_runtime_smoke_and_always_cleans_up():
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    parsed = yaml.safe_load(workflow)
+    job = parsed["jobs"]["test"]
+    assert 0 < job["timeout-minutes"] <= 15
+    smoke = next(
+        step["run"]
+        for step in job["steps"]
+        if step.get("name") == "Runtime smoke production Compose"
+    )
+    cleanup = next(
+        step
+        for step in job["steps"]
+        if step.get("name") == "Cleanup runtime smoke"
+    )
+    assert "docker compose -f docker-compose.prod.yml build --pull" in workflow
+    assert 'timeout 180s "${compose[@]}" up -d --no-build' in smoke
+    assert "wait_for_health redis" in smoke
+    assert "wait_for_health web" in smoke
+    assert "local deadline=$((SECONDS + 120))" in smoke
+    assert "curl --fail --silent --show-error --output /dev/null" in smoke
+    assert "--connect-timeout 3 --max-time 10" in smoke
+    assert "worker_restarts" in smoke
+    for line in smoke.splitlines():
+        if "docker inspect" in line:
+            assert "timeout 10s docker inspect" in line
+    assert cleanup["if"] == "always()"
+    assert cleanup["run"].startswith("timeout 120s docker compose")
+    assert "down -v --remove-orphans || true" in cleanup["run"]
+    unsafe = ("docker compose logs", "Config.Env", "printenv", "api.telegram.org/bot")
+    assert not any(marker in smoke for marker in unsafe)
+    assert "docker compose config" not in workflow.replace(
+        "docker compose -f docker-compose.prod.yml config --quiet",
+        "",
+    )
 
 
 def test_worker_does_not_inherit_http_healthcheck():

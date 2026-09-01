@@ -34,6 +34,8 @@ x-app-common: &app-common
 services:
   redis:
     image: redis:7.4.5-alpine
+    # Start as the pinned image's redis user: cap_drop=ALL forbids entrypoint setuid/setgid.
+    user: "999:1000"
     restart: unless-stopped
     init: true
     read_only: true

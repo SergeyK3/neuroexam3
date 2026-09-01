@@ -10,6 +10,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       matrix:
         python-version: ["3.12"]
@@ -51,4 +52,71 @@ jobs:
         run: docker compose -f docker-compose.prod.yml config --quiet
 
       - name: Build production image
-        run: docker build --pull -t neuroexam3:ci .
+        run: docker compose -f docker-compose.prod.yml build --pull
+
+      - name: Runtime smoke production Compose
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          compose=(docker compose -f docker-compose.prod.yml)
+
+          container_id() {
+            "${compose[@]}" ps -q "$1"
+          }
+
+          health_status() {
+            timeout 10s docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$1"
+          }
+
+          safe_diagnostics() {
+            for service in redis web worker; do
+              id="$(container_id "$service")"
+              if [[ -z "$id" ]]; then
+                echo "$service: container missing" >&2
+                continue
+              fi
+              timeout 10s docker inspect --format \
+                'service={{index .Config.Labels "com.docker.compose.service"}} state={{.State.Status}} health={{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}} restarts={{.RestartCount}}' \
+                "$id" >&2 || true
+            done
+          }
+
+          wait_for_health() {
+            local service="$1"
+            local id
+            local deadline=$((SECONDS + 120))
+            for _ in {1..60}; do
+              id="$(container_id "$service")"
+              if [[ -n "$id" && "$(health_status "$id")" == healthy ]]; then
+                return 0
+              fi
+              if (( SECONDS >= deadline )); then
+                break
+              fi
+              sleep 2
+            done
+            echo "$service did not become healthy" >&2
+            return 1
+          }
+
+          trap safe_diagnostics ERR
+          timeout 180s "${compose[@]}" up -d --no-build
+          wait_for_health redis
+          wait_for_health web
+          curl --fail --silent --show-error --output /dev/null \
+            --connect-timeout 3 --max-time 10 http://127.0.0.1:8200/health
+
+          worker_id="$(container_id worker)"
+          [[ -n "$worker_id" ]]
+          [[ "$(timeout 10s docker inspect --format '{{.State.Status}}' "$worker_id")" == running ]]
+          worker_restarts="$(timeout 10s docker inspect --format '{{.RestartCount}}' "$worker_id")"
+          [[ "$worker_restarts" == 0 ]]
+          sleep 10
+          [[ "$(timeout 10s docker inspect --format '{{.State.Status}}' "$worker_id")" == running ]]
+          [[ "$(timeout 10s docker inspect --format '{{.RestartCount}}' "$worker_id")" == "$worker_restarts" ]]
+          trap - ERR
+
+      # The volume contains placeholders only and exists solely for this CI job.
+      - name: Cleanup runtime smoke
+        if: always()
+        run: timeout 120s docker compose -f docker-compose.prod.yml down -v --remove-orphans || true
