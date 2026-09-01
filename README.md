@@ -62,7 +62,7 @@ cd neuroexam3
 python -m venv .venv
 # Windows: .venv\Scripts\activate
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install --require-hashes -r requirements.lock
 cp .env.example .env
 # Отредактируйте .env — см. таблицу ниже
 uvicorn main:app --reload --port 8000
@@ -200,7 +200,8 @@ curl -X POST http://localhost:8000/exam/evaluate-text \
 ## Тесты
 
 ```bash
-pytest
+pip install --require-hashes -r requirements-test.lock
+python -m pytest tests/ -q
 ```
 
 В CI (GitHub Actions) на push/PR в `main` или `master` выполняется то же самое. Redis в CI **не** поднимается: в тестах `REDIS_URL` принудительно пустой.
@@ -261,7 +262,7 @@ arq app.workers.worker_settings.WorkerSettings
 
 ### CI (GitHub Actions)
 
-Установка зависимостей из `requirements.txt` и `pytest tests/`. Секреты репозитория не требуются.
+Установка зависимостей из `requirements-test.lock` и `pytest tests/`. Секреты репозитория не требуются.
 
 ### Docker
 

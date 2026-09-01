@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 from app.api.routes import router
 from app.api.telegram_webhook import router as telegram_router
@@ -56,6 +57,12 @@ app = FastAPI(
 
 app.include_router(router)
 app.include_router(telegram_router)
+
+
+@app.get("/", include_in_schema=False)
+async def root() -> RedirectResponse:
+    """Redirect operators to the interactive API documentation."""
+    return RedirectResponse(url="/docs")
 
 
 @app.get("/health", tags=["system"])

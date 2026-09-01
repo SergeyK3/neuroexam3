@@ -19,6 +19,23 @@ env/
 
 # Environment / secrets
 .env
+.env.*
+!.env.example
+*.env
+*credential*.json
+*service-account*.json
+service_account*.json
+*oauth*.json
+client_secret*.json
+*token*.json
+.secrets*
+*.pem
+*.key
+*.p12
+*.pfx
+id_rsa
+id_ed25519
+secrets/
 
 # Pytest
 .pytest_cache/

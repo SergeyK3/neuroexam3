@@ -1,0 +1,103 @@
+name: neuroexam3
+
+x-app-common: &app-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  init: true
+  read_only: true
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=64m
+  env_file:
+    - ${NEUROEXAM3_ENV_FILE:-/etc/neuroexam3/neuroexam3.env}
+  environment:
+    REDIS_URL: redis://redis:6379/0
+    GOOGLE_SHEETS_CREDENTIALS: /run/secrets/neuroexam3-google-service-account.json
+  volumes:
+    - type: bind
+      source: ${NEUROEXAM3_GOOGLE_CREDENTIALS_FILE:-/etc/neuroexam3/google-service-account.json}
+      target: /run/secrets/neuroexam3-google-service-account.json
+      read_only: true
+  networks:
+    - internal
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+services:
+  redis:
+    image: redis:7.4.5-alpine
+    restart: unless-stopped
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    mem_limit: 256m
+    pids_limit: 64
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  web:
+    <<: *app-common
+    ports:
+      - "127.0.0.1:8200:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    mem_limit: 512m
+    pids_limit: 128
+
+  worker:
+    <<: *app-common
+    command: ["arq", "app.workers.worker_settings.WorkerSettings"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      GOOGLE_SHEETS_CREDENTIALS: /run/secrets/neuroexam3-google-service-account.json
+      ARQ_MAX_JOBS: "${ARQ_MAX_JOBS:-2}"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+    mem_limit: 1024m
+    pids_limit: 256
+
+networks:
+  internal:
+    name: neuroexam3_internal
+    driver: bridge
+
+volumes:
+  redis_data:
+    name: neuroexam3_redis_data

@@ -13,8 +13,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.lock .
+RUN pip install --no-cache-dir --require-hashes -r requirements.lock
 
 # Непривилегированный пользователь: приложение не должно иметь прав root в рантайме.
 RUN useradd -r -u 10001 -m -d /home/app -s /usr/sbin/nologin app

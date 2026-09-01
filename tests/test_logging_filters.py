@@ -20,31 +20,35 @@ def _make_record(msg: str, *args: object) -> logging.LogRecord:
 
 
 def test_bot_token_filter_masks_url():
+    token = "1234567890:" + "TESTONLY" * 5
     rec = _make_record(
-        "error at https://api.telegram.org/bot1234567890:ABC-def_XYZ/sendMessage",
+        f"error at https://api.telegram.org/bot{token}/sendMessage",
     )
     BotTokenFilter().filter(rec)
-    assert "bot-token" in rec.getMessage()
-    assert "ABC-def_XYZ" not in rec.getMessage()
+    assert "[REDACTED]" in rec.getMessage()
+    assert token not in rec.getMessage()
 
 
 def test_bot_token_filter_masks_bare_token_in_args():
-    rec = _make_record("token=%s", "1234567890:ABCDEFGHIJabcdefghij0123456789XY")
+    token = "1234567890:" + "TESTONLY" * 5
+    rec = _make_record("token=%s", token)
     BotTokenFilter().filter(rec)
-    assert "<bot-token>" in rec.getMessage()
+    assert "[REDACTED]" in rec.getMessage()
 
 
 def test_bot_token_filter_masks_bare_token_in_msg():
-    rec = _make_record("token=1234567890:ABCDEFGHIJabcdefghij0123456789XY done")
+    token = "1234567890:" + "TESTONLY" * 5
+    rec = _make_record(f"token={token} done")
     BotTokenFilter().filter(rec)
-    assert "<bot-token>" in rec.getMessage()
+    assert "[REDACTED]" in rec.getMessage()
 
 
 def test_bot_token_filter_masks_openai_api_key():
-    rec = _make_record("using key=sk-1234567890ABCDEFabcdef for call")
+    key = "sk-" + "TESTONLY" * 3
+    rec = _make_record(f"using key={key} for call")
     BotTokenFilter().filter(rec)
-    assert "<api-key>" in rec.getMessage()
-    assert "sk-1234567890ABCDEFabcdef" not in rec.getMessage()
+    assert "[REDACTED]" in rec.getMessage()
+    assert key not in rec.getMessage()
 
 
 def test_pii_filter_masks_fio_short():

@@ -26,7 +26,29 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install --require-hashes -r requirements-test.lock
 
       - name: Run tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          PYTEST_ADDOPTS: "-p no:cacheprovider"
         run: python -m pytest tests/ -q
+
+      - name: Secret pattern scan
+        run: python scripts/secret_scan.py
+
+      - name: Validate deployment shell
+        run: bash -n deploy/prepare-ps-kz.sh
+
+      - name: Prepare placeholder deployment files
+        run: |
+          printf 'REQUIRE_WEBHOOK_SECRET=false\n' > "$RUNNER_TEMP/neuroexam3.env"
+          printf '{}\n' > "$RUNNER_TEMP/google-service-account.json"
+          echo "NEUROEXAM3_ENV_FILE=$RUNNER_TEMP/neuroexam3.env" >> "$GITHUB_ENV"
+          echo "NEUROEXAM3_GOOGLE_CREDENTIALS_FILE=$RUNNER_TEMP/google-service-account.json" >> "$GITHUB_ENV"
+
+      - name: Validate production Compose
+        run: docker compose -f docker-compose.prod.yml config --quiet
+
+      - name: Build production image
+        run: docker build --pull -t neuroexam3:ci .
