@@ -94,12 +94,24 @@ def _sanitize_record(record: logging.LogRecord) -> logging.LogRecord:
         record.exc_text = safe_traceback
         record.exc_info = None
 
+    # Keep the original msg/args structure: specialized formatters such as
+    # uvicorn.logging.AccessFormatter inspect the five access-log arguments
+    # directly. Flattening every record to a rendered string breaks those
+    # formatters even though ordinary logging.Formatter still works.
+    record.msg = _redact_value(record.msg)
+    record.args = _redact_value(record.args)
     try:
         rendered = record.getMessage()
-    except Exception:  # pragma: no cover - defensive fallback for broken third-party args
-        rendered = str(record.msg)
-    record.msg = _redact_tokens(rendered)
-    record.args = ()
+    except Exception:  # pragma: no cover - defensive fallback for malformed third-party args
+        record.msg = _redact_tokens(str(record.msg))
+        record.args = ()
+    else:
+        safe_rendered = _redact_tokens(rendered)
+        if safe_rendered != rendered:
+            # Covers secret-bearing custom objects whose __str__ output cannot
+            # be sanitized by recursively replacing ordinary containers.
+            record.msg = safe_rendered
+            record.args = ()
 
     for key, value in tuple(record.__dict__.items()):
         if key in {"msg", "args", "exc_info", "exc_text"}:
