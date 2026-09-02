@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 
+from uvicorn.logging import AccessFormatter
+
 from app.core.logging_filters import BotTokenFilter, PiiMaskFilter
 
 
@@ -49,6 +51,33 @@ def test_bot_token_filter_masks_openai_api_key():
     BotTokenFilter().filter(rec)
     assert "[REDACTED]" in rec.getMessage()
     assert key not in rec.getMessage()
+
+
+def test_bot_token_filter_preserves_uvicorn_access_log_arguments():
+    rec = _make_record(
+        '%s - "%s %s HTTP/%s" %d',
+        "127.0.0.1:12345",
+        "GET",
+        "/health",
+        "1.1",
+        200,
+    )
+
+    BotTokenFilter().filter(rec)
+
+    assert rec.args == (
+        "127.0.0.1:12345",
+        "GET",
+        "/health",
+        "1.1",
+        200,
+    )
+    formatter = AccessFormatter(
+        "%(levelprefix)s %(client_addr)s - %(request_line)s %(status_code)s"
+    )
+    rendered = formatter.format(rec)
+    assert "GET /health HTTP/1.1" in rendered
+    assert "200" in rendered
 
 
 def test_pii_filter_masks_fio_short():
