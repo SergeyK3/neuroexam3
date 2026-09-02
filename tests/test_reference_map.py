@@ -258,6 +258,28 @@ async def test_get_reference_map_prefers_course_name_map(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_unknown_registration_course_never_falls_back_to_default_sheet(monkeypatch):
+    monkeypatch.setattr(cfg.settings, "google_sheets_credentials", "/fake/path.json", raising=False)
+    monkeypatch.setattr(cfg.settings, "google_sheet_id", "", raising=False)
+    monkeypatch.setattr(cfg.settings, "discipline_google_sheet_ids_json", '{"sample":"wrong-ai-sheet"}', raising=False)
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        (
+            '{"Информационные технологии в здравоохранении":"id-it",'
+            '"Искусственный интеллект в здравоохранении":"id-ai"}'
+        ),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="не распознана однозначно"):
+        await reference_map_service.get_reference_map(
+            "sample",
+            registration_raw="Цифровые технологии в здравоохранении\nТекущий контроль\n402\nСтудент",
+        )
+
+
+@pytest.mark.asyncio
 async def test_select_relevant_questions_async_trusts_explicit_key(monkeypatch):
     """Если студент явно назвал ключ, он должен быть включён даже при слабой семантике."""
     monkeypatch.setattr(cfg.settings, "openai_api_key", "sk-test", raising=False)

@@ -59,6 +59,17 @@ def _fragments_from_message(text: str) -> list[str]:
     return [single]
 
 
+_REGISTRATION_NUMBER_RE = re.compile(r"^\s*([1-4])(?:[).:;\-]|\s+)\s*(.+?)\s*$")
+
+
+def _strip_registration_number(fragment: str) -> tuple[int | None, str]:
+    """Убрать операторскую нумерацию ``1)…4)`` из поля регистрации."""
+    match = _REGISTRATION_NUMBER_RE.match(fragment or "")
+    if not match:
+        return (None, fragment.strip())
+    return (int(match.group(1)), match.group(2).strip())
+
+
 @dataclass
 class FsmOutcome:
     """Результат шага FSM: ответы пользователю и опционально текст для оценки."""
@@ -165,11 +176,21 @@ def process_message(
         frags = _fragments_from_message(t)
         if not frags:
             return FsmOutcome(session, [t_("send_nonempty_text", lang)])
-        buf = list(session.registration_parts)
-        for f in frags:
+
+        numbered = [_strip_registration_number(fragment) for fragment in frags]
+        # Если после частичного ввода студент снова прислал полный список
+        # 1)…4), это исправление регистрации, а не ещё три поля для старого
+        # буфера. Полный список атомарно заменяет накопленное значение.
+        if len(numbered) == 4 and {index for index, _value in numbered} == {1, 2, 3, 4}:
+            by_index = {index: value for index, value in numbered if index is not None}
+            buf = [by_index[index] for index in range(1, 5)]
+        else:
+            buf = list(session.registration_parts)
+        for _index, value in ([] if len(buf) == 4 else numbered):
             if len(buf) >= 4:
                 break
-            buf.append(f)
+            if value:
+                buf.append(value)
         session.registration_parts = buf
         if len(session.registration_parts) < 4:
             n = len(session.registration_parts)
@@ -180,7 +201,13 @@ def process_message(
                     t_("registration_progress", lang, n=n, field=nxt, remaining=4 - n),
                 ],
             )
-        session.registration_raw = "\n".join(session.registration_parts[:4])
+        registration_raw = "\n".join(session.registration_parts[:4])
+        course_map_enabled = bool((settings.discipline_course_name_sheet_ids_json or "").strip())
+        if course_map_enabled and settings.spreadsheet_id_for_registration_course(registration_raw) is None:
+            session.registration_parts = []
+            session.registration_raw = None
+            return FsmOutcome(session, [t_("registration_course_not_matched", lang)])
+        session.registration_raw = registration_raw
         session.registration_parts = []
         session.state = ExamState.ANSWERING
         return FsmOutcome(

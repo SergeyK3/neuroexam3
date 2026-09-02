@@ -408,6 +408,16 @@ def _sheet_id_for_session(
         logger.info("Таблица выбрана по 1-й строке регистрации (название дисциплины)")
         return sid
 
+    # Если оператор настроил маршрутизацию по полному названию курса, а
+    # введённое название не распознано уверенно, нельзя молча откатываться к
+    # DEFAULT_DISCIPLINE/sample: это загрузит чужие эталоны и исказит оценку.
+    course = settings.registration_course_first_line(registration_raw)
+    if course and (settings.discipline_course_name_sheet_ids_json or "").strip():
+        raise ValueError(
+            f"Дисциплина «{course}» не распознана однозначно. "
+            "Введите точное название дисциплины из списка преподавателя.",
+        )
+
     raw = (settings.discipline_google_sheet_ids_json or "").strip()
     if raw:
         try:

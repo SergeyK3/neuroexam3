@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.models.session import ExamSession
+from app.models.session import ExamSession, ExamState
 from app.models.question_bank import QuestionRecord
 from app.services import bot_update_handler
 from app.services.evaluation_service import CoverageScores
@@ -111,7 +111,7 @@ def test_repair_segments_keeps_multiple_substantial_segments():
 
 
 @pytest.mark.asyncio
-async def test_handle_answer_payload_waits_for_second_answer(monkeypatch):
+async def test_handle_answer_payload_waits_for_second_answer_without_completion(monkeypatch):
     sent: list[str] = []
 
     async def fake_send(_chat_id: int, text: str) -> None:
@@ -139,13 +139,79 @@ async def test_handle_answer_payload_waits_for_second_answer(monkeypatch):
         sess,
         chat_id=1,
         user_id=1,
-        raw_text="Развернутый ответ по первому вопросу. Ответ закончен.",
+        raw_text="Развернутый ответ по первому вопросу.",
         telegram_message_id=11,
     )
 
     assert sess.pending_transcript
     assert "1 из 2" in sent[-1]
-    assert "Ответ закончен" in sent[-1]
+
+
+@pytest.mark.asyncio
+async def test_handle_answer_payload_completion_scores_missing_answer_as_50(monkeypatch):
+    sent: list[str] = []
+    exported: list[dict] = []
+
+    async def fake_send(_chat_id: int, text: str) -> None:
+        sent.append(text)
+
+    async def fake_bank(_discipline_id, registration_raw=None):
+        return [
+            QuestionRecord(question_key="Q1", question_text="Первый", reference_answer="Эталон 1"),
+            QuestionRecord(question_key="Q2", question_text="Второй", reference_answer="Эталон 2"),
+        ]
+
+    async def fake_candidates(_transcript: str, _bank, *, expected_count=None):
+        if expected_count == 2:
+            return list(_bank)
+        assert expected_count == 1
+        return [QuestionRecord(question_key="Q1", question_text="Первый", reference_answer="Эталон 1")]
+
+    async def fake_segment(_transcript: str, questions: list[QuestionRecord], *, use_llm: bool):
+        return ({questions[0].question_key: "Ответ. Развернутый ответ по первому вопросу."}, [])
+
+    async def fake_coverage(_student_answer: str, _reference: str) -> CoverageScores:
+        return CoverageScores(
+            score=80,
+            total_elements=1,
+            covered_elements=["элемент"],
+            partial_elements=[],
+            missing_elements=[],
+            elements=[],
+            general_comment="Ответ принят",
+        )
+
+    async def fake_export(**kwargs) -> None:
+        exported.append(kwargs)
+
+    monkeypatch.setattr("app.integrations.telegram_client.send_message", fake_send)
+    monkeypatch.setattr("app.services.reference_map_service.get_question_bank", fake_bank)
+    monkeypatch.setattr("app.services.bot_update_handler._candidate_questions_for_transcript", fake_candidates)
+    monkeypatch.setattr("app.services.segmentation_service.segment_with_fallback", fake_segment)
+    monkeypatch.setattr("app.services.evaluation_service.use_coverage_scoring", lambda: True)
+    monkeypatch.setattr("app.services.evaluation_service.evaluate_coverage", fake_coverage)
+    monkeypatch.setattr("app.services.results_export_service.export_question_scores", fake_export)
+    monkeypatch.setattr(bot_update_handler.settings, "openai_api_key", "test-key")
+
+    sess = ExamSession(
+        user_id=1,
+        registration_raw="Дисциплина\nТекущий контроль\n101\nИванов Иван",
+    )
+
+    await bot_update_handler._handle_answer_payload(
+        sess,
+        chat_id=1,
+        user_id=1,
+        raw_text="Билет 1. Вопрос 1. Развернутый ответ по первому вопросу. Ответ закончен.",
+        telegram_message_id=11,
+    )
+
+    assert exported, sent
+    assert [row[1] for row in exported[0]["scored_rows"]] == ["80", "50"]
+    assert "(80 + 50) / 2 = 65.0" in sent[-1]
+    assert "ответ отсутствует: 50/100" in sent[-1]
+    assert sess.pending_transcript is None
+    assert sess.state == ExamState.FINISH
 
 
 @pytest.mark.asyncio

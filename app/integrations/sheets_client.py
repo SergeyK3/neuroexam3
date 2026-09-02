@@ -308,6 +308,21 @@ def _find_dedup_col_idx(header_row: list[Any]) -> int | None:
     return None
 
 
+def _legacy_session_duplicate(existing: list[list[Any]], dedup_key: str, *, scan_limit: int) -> bool:
+    """Дедупликация старого 11-колоночного листа по user_id и session в комментарии."""
+    user_id, separator, session_id = dedup_key.partition(":")
+    if not separator or not user_id or not session_id or session_id == "-":
+        return False
+    start = max(1, len(existing) - scan_limit)
+    marker = f"session: {session_id}"
+    for previous in existing[start:]:
+        previous_user = str(previous[1]).strip() if len(previous) > 1 else ""
+        comment = str(previous[10]) if len(previous) > 10 else ""
+        if previous_user == user_id and marker in comment:
+            return True
+    return False
+
+
 def append_student_result_row_sync(
     spreadsheet_id: str,
     worksheet_title: str,
@@ -319,9 +334,9 @@ def append_student_result_row_sync(
 ) -> bool:
     """Добавить строку на лист результатов; при пустом листе — записать заголовок c колонкой Dedup Key.
 
-    Идемпотентность: если `dedup_key` задан и колонка Dedup Key есть в шапке,
-    ищем точное совпадение в последних `dedup_scan_limit` строках — при совпадении
-    пропускаем запись. Возвращает True, если строка реально записана.
+    Идемпотентность: при колонке Dedup Key ищем точный ключ; для старого
+    11-колоночного листа ищем пару user_id + ``session: ...`` в комментарии.
+    Возвращает True, если строка реально записана.
     """
     from app.integrations import google_sheets
 
@@ -355,16 +370,22 @@ def append_student_result_row_sync(
 
     dedup_idx = _find_dedup_col_idx(header)
 
-    # Проверяем дубликат только если у нас есть ключ и колонка для него.
-    if dedup_key and dedup_idx is not None and len(existing) > 1:
-        start = max(1, len(existing) - dedup_scan_limit)
-        for prev in existing[start:]:
-            if dedup_idx < len(prev) and prev[dedup_idx] == dedup_key:
-                logger.info(
-                    "Sheets append: duplicate dedup_key detected, skipping append (worksheet=%s)",
-                    worksheet_title,
-                )
-                return False
+    if dedup_key and len(existing) > 1:
+        duplicate = False
+        if dedup_idx is not None:
+            start = max(1, len(existing) - dedup_scan_limit)
+            duplicate = any(
+                dedup_idx < len(previous) and previous[dedup_idx] == dedup_key
+                for previous in existing[start:]
+            )
+        else:
+            duplicate = _legacy_session_duplicate(existing, dedup_key, scan_limit=dedup_scan_limit)
+        if duplicate:
+            logger.info(
+                "Sheets append: duplicate session detected, skipping append (worksheet=%s)",
+                worksheet_title,
+            )
+            return False
 
     # Если в шапке есть колонка Dedup Key — дописываем ключ в соответствующую позицию.
     row_out = list(row)
@@ -443,10 +464,10 @@ def build_result_row(
         "\n".join(
             p
             for p in (
+                f"Маршрут дисциплины (бот): {discipline_slug}" if discipline_slug else "",
+                f"session: {session_id}" if session_id else "",
                 (rationale or "").strip(),
                 f"Ключ вопроса: {question_key}" if question_key else "",
-                f"Код дисциплины (бот): {discipline_slug}" if discipline_slug else "",
-                f"session: {session_id}" if session_id else "",
             )
             if p
         ),
