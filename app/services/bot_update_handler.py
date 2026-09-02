@@ -161,6 +161,34 @@ def _expected_question_count_from_registration(
     return reference_map_service.infer_expected_question_count(transcript)
 
 
+def _observed_question_count(transcript: str | None) -> int | None:
+    """Число явно обозначенных вопросов/ключей или ``None`` без маркеров."""
+    text = (transcript or "").strip()
+    if not text:
+        return None
+    counts: list[int] = []
+    numeric = [int(value) for value in re.findall(r"(?i)\bвопрос\s*(?:номер\s*|№\s*)?(\d+)\b", text)]
+    if numeric:
+        counts.append(max(numeric))
+    low = text.lower()
+    ordinal_markers = (
+        ("первый вопрос", 1),
+        ("вопрос один", 1),
+        ("второй вопрос", 2),
+        ("вопрос два", 2),
+        ("третий вопрос", 3),
+        ("вопрос три", 3),
+        ("четвертый вопрос", 4),
+        ("четвёртый вопрос", 4),
+        ("вопрос четыре", 4),
+    )
+    counts.extend(number for marker, number in ordinal_markers if marker in low)
+    key_mentions = len(re.findall(r"(?i)\b(?:ключ(?:\s*вопроса)?|шифр|код(?:\s*вопроса)?)\b", text))
+    if key_mentions:
+        counts.append(min(key_mentions, 4))
+    return min(max(counts), 4) if counts else None
+
+
 def _merge_transcripts(existing: str | None, incoming: str) -> str:
     cur = (existing or "").strip()
     new = incoming.strip()
@@ -362,8 +390,9 @@ async def _evaluate_and_reply(
     telegram_message_id: int | None = None,
     ticket_number: str | None = None,
     expected_question_count: int | None = None,
+    answered_question_count: int | None = None,
     reply_language: str = "ru",
-) -> None:
+) -> bool:
     """Сегментация по кандидатным вопросам и оценка каждого непустого фрагмента."""
     cleaned = strip_embedded_bot_output((transcript or "").strip())
     if not cleaned:
@@ -371,7 +400,7 @@ async def _evaluate_and_reply(
             chat_id,
             t("cant_get_text_for_scoring", reply_language),
         )
-        return
+        return False
     transcript = cleaned
     transcript_for_scoring = strip_answer_completion_markers(transcript)
     if not transcript_for_scoring.strip():
@@ -379,7 +408,7 @@ async def _evaluate_and_reply(
             chat_id,
             t("only_completion_phrase", reply_language),
         )
-        return
+        return False
 
     try:
         bank = await reference_map_service.get_question_bank(
@@ -391,19 +420,20 @@ async def _evaluate_and_reply(
             chat_id,
             t("config_error", reply_language, details=telegram_client.redact_secrets(str(e))),
         )
-        return
+        return False
 
     if not bank:
         await telegram_client.send_message(
             chat_id,
             t("no_references", reply_language),
         )
-        return
+        return False
 
+    selection_count = answered_question_count or expected_question_count
     questions = await _candidate_questions_for_transcript(
         transcript,
         bank,
-        expected_count=expected_question_count,
+        expected_count=selection_count,
     )
     logger.info(
         "Кандидатные вопросы (%d): %s | transcript_len=%d",
@@ -414,7 +444,7 @@ async def _evaluate_and_reply(
     logger.debug("Транскрипт (полный): %s", transcript)
     if not questions:
         await telegram_client.send_message(chat_id, t("no_questions_match", reply_language))
-        return
+        return False
 
     parts, notes = await segmentation_service.segment_with_fallback(
         transcript,
@@ -442,7 +472,7 @@ async def _evaluate_and_reply(
         lines.append(t("full_transcript_label", reply_language))
         lines.append(_truncate_block(transcript, 3500))
         await telegram_client.send_message(chat_id, "\n".join(lines))
-        return
+        return False
 
     use_coverage = evaluation_service.use_coverage_scoring()
 
@@ -504,6 +534,22 @@ async def _evaluate_and_reply(
             sim_scores.append(sim)
             scored.append((key, f"{sim:.4f}", seg, ""))
 
+    expected_total = expected_question_count or question_ordinal
+    answered_total = answered_question_count if answered_question_count is not None else question_ordinal
+    missing_count = max(0, expected_total - min(answered_total, expected_total))
+    for _ in range(missing_count):
+        question_ordinal += 1
+        lines.append("")
+        lines.append(f"• {t('question_label', reply_language, n=question_ordinal)}")
+        if use_coverage:
+            lines.append(f"  — {t('missing_answer_score', reply_language, score='50/100')}")
+            totals_100.append(50)
+            scored.append(("", "50", "", t("missing_answer_rationale", reply_language, score="50/100")))
+        else:
+            lines.append(f"  — {t('missing_answer_score', reply_language, score='0.5000')}")
+            sim_scores.append(0.5)
+            scored.append(("", "0.5000", "", t("missing_answer_rationale", reply_language, score="0.5000")))
+
     if use_coverage and totals_100:
         mean_r = sum(totals_100) / len(totals_100)
         lines.append("")
@@ -536,6 +582,7 @@ async def _evaluate_and_reply(
             telegram_message_id=telegram_message_id,
             ticket_number=ticket_number,
         )
+    return bool(scored)
 
 
 async def _handle_answer_payload(
@@ -604,6 +651,9 @@ async def _handle_answer_payload(
     parts = _repair_segments(sess.pending_transcript, questions, parts)
     answered_count = _count_answered_questions(questions, parts)
     completion_seen = contains_answer_completion_marker(normalized)
+    observed_count = _observed_question_count(sess.pending_transcript)
+    if observed_count is not None:
+        answered_count = min(answered_count, observed_count)
     if answered_count == 0 and target_count <= 1 and _has_meaningful_answer_text(sess.pending_transcript):
         answered_count = 1
     logger.info(
@@ -615,14 +665,14 @@ async def _handle_answer_payload(
         len(sess.pending_transcript or ""),
     )
 
-    if answered_count < target_count:
+    if answered_count < target_count and not completion_seen:
         await telegram_client.send_message(
             chat_id,
             _pending_progress_message(answered_count, target_count, completion_seen, reply_language),
         )
         return
 
-    await _evaluate_and_reply(
+    completed = await _evaluate_and_reply(
         chat_id,
         sess.pending_transcript,
         telegram_user_id=user_id,
@@ -632,9 +682,12 @@ async def _handle_answer_payload(
         telegram_message_id=telegram_message_id,
         ticket_number=sess.ticket_number,
         expected_question_count=expected_count,
+        answered_question_count=max(1, min(answered_count, target_count)),
         reply_language=reply_language,
     )
     sess.pending_transcript = None
+    if completed:
+        sess.state = ExamState.FINISH
 
 
 async def _handle_voice_answering(

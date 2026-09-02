@@ -36,3 +36,45 @@ def test_ai_abbreviation_matches_full_course_name(monkeypatch):
     )
     raw = "ИИ в здравоохранении\nЭкзамен\n1\nИванов"
     assert cfg.settings.spreadsheet_id_for_registration_course(raw) == "id-ai"
+
+
+def test_generic_course_words_do_not_select_another_discipline(monkeypatch):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        (
+            '{"Информационные технологии в здравоохранении":"id-it",'
+            '"Искусственный интеллект в здравоохранении":"id-ai"}'
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(cfg.settings, "discipline_course_name_match_threshold", 0.45, raising=False)
+
+    raw = "Цифровые технологии в здравоохранении\nТекущий контроль\n402\nСтудент"
+
+    assert cfg.settings.spreadsheet_id_for_registration_course(raw) is None
+
+
+def test_short_generic_substring_does_not_select_information_technology(monkeypatch):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        '{"Информационные технологии в здравоохранении":"id-it"}',
+        raising=False,
+    )
+
+    assert cfg.settings.spreadsheet_id_for_registration_course("Технологии в здравоохранении") is None
+
+
+def test_abbreviated_information_technology_course_is_still_recognized(monkeypatch):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        '{"Информационные технологии в здравоохранении":"id-it"}',
+        raising=False,
+    )
+    monkeypatch.setattr(cfg.settings, "discipline_course_name_match_threshold", 0.45, raising=False)
+
+    raw = "Инф технологии в здрав\nТекущий контроль\n402\nСтудент"
+
+    assert cfg.settings.spreadsheet_id_for_registration_course(raw) == "id-it"

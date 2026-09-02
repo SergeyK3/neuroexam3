@@ -99,6 +99,11 @@ _TEXTS: dict[str, dict[str, str]] = {
         "kk": "Тіркеу мәліметтерін мәтінмен жіберіңіз (жоғарыдағы тізімді қараңыз).",
         "en": "Please send the registration details as text (see the list above).",
     },
+    "registration_course_not_matched": {
+        "ru": "Название дисциплины не распознано. Отправьте заново все четыре сведения, используя точное название дисциплины преподавателя.",
+        "kk": "Пән атауы танылмады. Оқытушы көрсеткен пәннің дәл атауын қолданып, төрт мәліметті қайта жіберіңіз.",
+        "en": "The course name was not recognized. Send all four details again using the exact course name provided by the teacher.",
+    },
     "send_nonempty_text": {
         "ru": "Отправьте непустой текст.",
         "kk": "Бос емес мәтін жіберіңіз.",
@@ -266,6 +271,16 @@ _TEXTS: dict[str, dict[str, str]] = {
         "ru": "сходство: {score}",
         "kk": "ұқсастық: {score}",
         "en": "similarity: {score}",
+    },
+    "missing_answer_score": {
+        "ru": "ответ отсутствует: {score}",
+        "kk": "жауап жоқ: {score}",
+        "en": "answer missing: {score}",
+    },
+    "missing_answer_rationale": {
+        "ru": "Ответ отсутствует; применена минимальная оценка {score}.",
+        "kk": "Жауап жоқ; ең төменгі {score} бағасы қолданылды.",
+        "en": "The answer is missing; the minimum score of {score} was applied.",
     },
     "average_label": {
         "ru": "Средняя оценка по вопросам:",

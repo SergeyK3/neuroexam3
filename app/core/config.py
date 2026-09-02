@@ -4,6 +4,7 @@ import difflib
 import json
 import logging
 import os
+import re
 import unicodedata
 
 from pydantic import field_validator, model_validator
@@ -200,9 +201,37 @@ class Settings(BaseSettings):
         t = unicodedata.normalize("NFC", (s or "").strip().lower())
         t = " ".join(t.split())
         # Частое сокращение в регистрационных данных: «ИИ» вместо «искусственный интеллект».
-        t = t.replace("ии в здравоохранении", "искусственный интеллект в здравоохранении")
-        t = t.replace("ии в медицине", "искусственный интеллект в медицине")
+        t = re.sub(r"\bии\s+в\s+здравоохранении\b", "искусственный интеллект в здравоохранении", t)
+        t = re.sub(r"\bии\s+в\s+медицине\b", "искусственный интеллект в медицине", t)
         return t
+
+    @classmethod
+    def _course_token_coverage(cls, entered: str, configured: str) -> float:
+        """Доля содержательных слов курса, подтверждённых вводом студента.
+
+        Префиксы длиной от трёх символов считаются сокращениями (``инф`` →
+        ``информационные``), а небольшая опечатка — совпадением. Это не даёт
+        общим словам вроде «технологии» и «здравоохранение» выбрать чужой курс.
+        """
+        stopwords = {"в", "во", "и", "на", "по", "для", "с", "со"}
+        entered_tokens = [t for t in cls._normalize_course_label(entered).split() if t not in stopwords]
+        configured_tokens = [t for t in cls._normalize_course_label(configured).split() if t not in stopwords]
+        if not entered_tokens or not configured_tokens:
+            return 0.0
+
+        def matches(left: str, right: str) -> bool:
+            if left == right:
+                return True
+            if min(len(left), len(right)) >= 3 and (left.startswith(right) or right.startswith(left)):
+                return True
+            return difflib.SequenceMatcher(None, left, right).ratio() >= 0.75
+
+        matched = sum(
+            1
+            for configured_token in configured_tokens
+            if any(matches(configured_token, token) for token in entered_tokens)
+        )
+        return matched / len(configured_tokens)
 
     def spreadsheet_id_for_registration_course(self, registration_raw: str | None) -> str | None:
         """
@@ -239,7 +268,7 @@ class Settings(BaseSettings):
         for nk, sid in norm_map.items():
             if not nk:
                 continue
-            if nk in cn or cn in nk:
+            if (nk in cn or cn in nk) and self._course_token_coverage(cn, nk) >= 0.75:
                 kl = len(nk)
                 if kl > best_klen:
                     best_klen = kl
@@ -253,6 +282,7 @@ class Settings(BaseSettings):
         cn_sorted_words = " ".join(sorted(cn.split()))
         best_ratio = 0.0
         fuzzy_sid: str | None = None
+        fuzzy_key = ""
         fuzzy_klen = 0
         for nk, sid in norm_map.items():
             if not nk:
@@ -265,8 +295,16 @@ class Settings(BaseSettings):
             if r > best_ratio or (abs(r - best_ratio) < 1e-6 and len(nk) > fuzzy_klen):
                 best_ratio = r
                 fuzzy_sid = sid
+                fuzzy_key = nk
                 fuzzy_klen = len(nk)
-        if fuzzy_sid is not None and best_ratio >= thr:
+        # Символьного сходства недостаточно: «цифровые технологии в
+        # здравоохранении» не должны превращаться в «искусственный интеллект
+        # в здравоохранении». Требуем подтверждения минимум 75% содержательных
+        # слов настроенного курса, сохраняя поддержку сокращений и опечаток.
+        token_coverage = 0.0
+        if fuzzy_sid is not None:
+            token_coverage = self._course_token_coverage(cn, fuzzy_key)
+        if fuzzy_sid is not None and best_ratio >= thr and token_coverage >= 0.75:
             return fuzzy_sid
         return None
 

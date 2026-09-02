@@ -128,3 +128,71 @@ def test_registration_four_parts_semicolon():
         is_start_command=False,
     )
     assert out.session.state == ExamState.ANSWERING
+
+
+def test_full_numbered_registration_replaces_partial_input_without_shift():
+    s = ExamSession(user_id=7, state=ExamState.REGISTRATION, language="ru")
+    partial = fsm_service.process_message(
+        s,
+        text="Инф технологии в здрав",
+        has_voice=False,
+        is_start_command=False,
+    )
+
+    out = fsm_service.process_message(
+        partial.session,
+        text=(
+            "1) Информационные технологии в здравоохранении\n"
+            "2) Текущий контроль\n"
+            "3) 402\n"
+            "4) Иванов Иван Иванович"
+        ),
+        has_voice=False,
+        is_start_command=False,
+    )
+
+    assert out.session.state == ExamState.ANSWERING
+    assert out.session.registration_raw == (
+        "Информационные технологии в здравоохранении\n"
+        "Текущий контроль\n"
+        "402\n"
+        "Иванов Иван Иванович"
+    )
+
+
+def test_numbered_registration_prefixes_are_not_saved_as_field_values():
+    s = ExamSession(user_id=8, state=ExamState.REGISTRATION, language="ru")
+
+    out = fsm_service.process_message(
+        s,
+        text="1 Курс\n2 Контроль\n3 402\n4 Студент",
+        has_voice=False,
+        is_start_command=False,
+    )
+
+    assert out.session.registration_raw == "Курс\nКонтроль\n402\nСтудент"
+
+
+def test_unknown_course_is_rejected_before_answering(monkeypatch):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        (
+            '{"Информационные технологии в здравоохранении":"it",'
+            '"Искусственный интеллект в здравоохранении":"ai"}'
+        ),
+        raising=False,
+    )
+    s = ExamSession(user_id=9, state=ExamState.REGISTRATION, language="ru")
+
+    out = fsm_service.process_message(
+        s,
+        text="Цифровые технологии в здравоохранении\nТекущий контроль\n402\nСтудент",
+        has_voice=False,
+        is_start_command=False,
+    )
+
+    assert out.session.state == ExamState.REGISTRATION
+    assert out.session.registration_raw is None
+    assert out.session.registration_parts == []
+    assert "не распознано" in out.messages[0]

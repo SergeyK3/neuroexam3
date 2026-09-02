@@ -88,14 +88,26 @@ def test_legacy_11_column_sheet_still_accepts_writes(monkeypatch):
     assert len(ws.rows[1]) == len(sheets_client._RESULT_HEADER)
 
 
-def test_legacy_sheet_without_dedup_key_does_not_dedup(monkeypatch):
-    """Лист без колонки Dedup Key — проверки дубликатов нет, оба вызова добавляют строку."""
+def test_legacy_sheet_without_dedup_key_deduplicates_by_user_and_session(monkeypatch):
+    """Старый лист дедуплицируется без изменения 11-колоночного контракта."""
     ws = _FakeWorksheet([list(sheets_client._RESULT_HEADER)])
     _patch_worksheet(monkeypatch, ws)
 
-    sheets_client.append_with_retries("sid", "tab", credentials_path="k", row=_make_row(), dedup_key="X")
-    sheets_client.append_with_retries("sid", "tab", credentials_path="k", row=_make_row(), dedup_key="X")
-    assert len(ws.rows) == 3
+    first = _make_row("first")
+    first[10] = "Вопрос 1: 80\n\nsession: S1"
+    second = _make_row("second")
+    second[10] = "Вопрос 1: 90\n\nsession: S1"
+
+    appended_first = sheets_client.append_with_retries(
+        "sid", "tab", credentials_path="k", row=first, dedup_key="42:S1",
+    )
+    appended_second = sheets_client.append_with_retries(
+        "sid", "tab", credentials_path="k", row=second, dedup_key="42:S1",
+    )
+
+    assert appended_first is True
+    assert appended_second is False
+    assert len(ws.rows) == 2
 
 
 @pytest.mark.asyncio

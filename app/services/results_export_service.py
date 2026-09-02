@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from app.core.config import settings
 from app.integrations import sheets_client
@@ -11,6 +12,13 @@ from app.integrations.google_sheets import results_worksheet_title
 from app.services import reference_map_service
 
 logger = logging.getLogger(__name__)
+
+_REGISTRATION_NUMBER_RE = re.compile(r"^\s*[1-4](?:[).:;\-]|\s+)\s*(.+?)\s*$")
+
+
+def _clean_registration_line(line: str) -> str:
+    match = _REGISTRATION_NUMBER_RE.match(line or "")
+    return (match.group(1) if match else line).strip()
 
 
 def parse_registration_lines(raw: str | None) -> tuple[str, str, str, str]:
@@ -20,7 +28,7 @@ def parse_registration_lines(raw: str | None) -> tuple[str, str, str, str]:
     """
     if not raw or not str(raw).strip():
         return ("", "", "", "")
-    lines = [ln.strip() for ln in str(raw).splitlines() if ln.strip()]
+    lines = [_clean_registration_line(ln) for ln in str(raw).splitlines() if ln.strip()]
     if len(lines) >= 4:
         return (lines[0], lines[1], lines[2], lines[3])
     if len(lines) == 3:
@@ -88,9 +96,6 @@ def _aggregate_score_display(scored_rows: list[tuple[str, str, str, str]]) -> st
 
 def _aggregate_rationale(
     scored_rows: list[tuple[str, str, str, str]],
-    *,
-    discipline_slug: str,
-    session_id: str,
 ) -> str:
     blocks: list[str] = []
     for idx, (question_key, score_display, _excerpt, rationale) in enumerate(scored_rows, start=1):
@@ -100,10 +105,6 @@ def _aggregate_rationale(
         if rationale.strip():
             parts.append(rationale.strip())
         blocks.append("\n".join(parts))
-    if discipline_slug:
-        blocks.append(f"Код дисциплины (бот): {discipline_slug}")
-    if session_id:
-        blocks.append(f"session: {session_id}")
     return "\n\n".join(blocks).strip()
 
 
@@ -145,12 +146,13 @@ async def export_question_scores(
             )
         return
 
-    slug = (discipline_id or settings.default_discipline or "").strip() or "-"
     course_name, control_type, group_number, student_fio = parse_registration_lines(registration_raw)
+    slug = (discipline_id or settings.default_discipline or "").strip() or "-"
+    route_label = course_name or slug
     row = sheets_client.build_result_row(
         telegram_user_id=telegram_user_id,
         session_id=session_id,
-        discipline_slug=slug,
+        discipline_slug=route_label,
         course_name=course_name,
         control_type=control_type,
         group_number=group_number,
@@ -166,15 +168,14 @@ async def export_question_scores(
             ticket_number=ticket_number or "",
             transcript=full_transcript,
         ),
-        rationale=_aggregate_rationale(
-            scored_rows,
-            discipline_slug=slug,
-            session_id=session_id,
-        ),
+        rationale=_aggregate_rationale(scored_rows),
         telegram_message_id=telegram_message_id,
         ticket_number=ticket_number or "",
     )
-    dedup_key = f"{telegram_user_id}:{session_id or '-'}:{telegram_message_id if telegram_message_id is not None else '-'}"
+    # Итоговая строка уникальна на пользователя и экзаменационную сессию.
+    # message_id намеренно не участвует: продолжение/повторная отправка в той
+    # же сессии не должна создавать ещё один итог.
+    dedup_key = f"{telegram_user_id}:{session_id or '-'}"
     try:
         appended = await asyncio.to_thread(
             sheets_client.append_with_retries,

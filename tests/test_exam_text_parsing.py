@@ -46,6 +46,11 @@ def test_contains_completion_marker():
     assert not contains_answer_completion_marker("Краткий ответ без служебной фразы.")
 
 
+def test_contains_natural_current_control_completion_marker():
+    assert contains_answer_completion_marker("Заканчиваю ответ.")
+    assert contains_answer_completion_marker("Заканчиваю текущий контрольный.")
+
+
 def test_extract_answer_after_otvet_oral_exam():
     raw = (
         "Билет номер 17. Первый вопрос. Какие данные включаются в электронные медицинские карты\n\n"
