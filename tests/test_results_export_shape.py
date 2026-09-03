@@ -134,3 +134,120 @@ def test_documented_transcript_duplicates_registration_data():
     assert "Студент: Петров П.П." in documented
     assert "Билет: 17" in documented
     assert documented.endswith("Полный ответ студента")
+
+
+def test_compose_comment_for_kk_contains_translation_before_evaluation():
+    comment = results_export_service._compose_comment(
+        "Вопрос 1: 80\nКомментарий: оценивание",
+        translation_ru="Связный русский перевод.",
+        translation_attempted=True,
+    )
+
+    assert comment == (
+        "Перевод на русский:\nСвязный русский перевод.\n\n"
+        "Оценивание:\nВопрос 1: 80\nКомментарий: оценивание"
+    )
+
+
+def test_compose_comment_for_ru_keeps_previous_format():
+    evaluation = "Вопрос 1: 80\nКомментарий: оценивание"
+    comment = results_export_service._compose_comment(
+        evaluation,
+        translation_ru=None,
+        translation_attempted=False,
+    )
+    assert comment == evaluation
+    assert "Перевод на русский" not in comment
+
+
+def test_compose_comment_uses_fallback_when_translation_failed():
+    comment = results_export_service._compose_comment(
+        "Вопрос 1: 80",
+        translation_ru=None,
+        translation_attempted=True,
+    )
+    assert "Перевод временно недоступен" in comment
+    assert comment.endswith("Оценивание:\nВопрос 1: 80")
+
+
+def test_long_translation_never_displaces_evaluation():
+    evaluation = "Вопрос 1: 80\n" + ("Оценивание сохранено. " * 80)
+    comment = results_export_service._compose_comment(
+        evaluation,
+        translation_ru="Очень длинный перевод. " * 1000,
+        translation_attempted=True,
+    )
+
+    assert len(comment) <= sheets_client.RESULT_COMMENT_MAX_CHARS
+    assert "[перевод сокращён из-за размера ячейки]" in comment
+    assert comment.endswith(f"Оценивание:\n{evaluation.strip()}")
+
+
+def test_oversized_evaluation_keeps_previous_clipping_behavior():
+    evaluation = "О" * (sheets_client.RESULT_COMMENT_MAX_CHARS + 100)
+    comment = results_export_service._compose_comment(
+        evaluation,
+        translation_ru="Перевод",
+        translation_attempted=True,
+    )
+    row = sheets_client.build_result_row(
+        telegram_user_id=1,
+        session_id="s",
+        discipline_slug="d",
+        course_name="Курс",
+        control_type="Экзамен",
+        student_fio="Иванов И.И.",
+        question_key="",
+        score_display="80",
+        full_transcript="исходный текст",
+        answer_excerpt="исходный текст",
+        rationale=comment,
+    )
+
+    assert comment == evaluation
+    assert row[10].startswith("Маршрут дисциплины (бот): d\nsession: s\n")
+    assert "О" * 100 in row[10]
+    assert row[10].endswith("…")
+    assert "Перевод" not in row[10]
+
+
+@pytest.mark.asyncio
+async def test_export_keeps_original_in_j_and_translation_only_in_k(monkeypatch):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(type(results_export_service.settings), "google_creds_path", lambda _self: "fake.json")
+    monkeypatch.setattr(
+        results_export_service.reference_map_service,
+        "spreadsheet_id_for_discipline",
+        lambda *_args, **_kwargs: "sheet-id",
+    )
+    monkeypatch.setattr(results_export_service, "results_worksheet_title", lambda _discipline_id: "students_answers")
+
+    def fake_append(_sheet_id, _tab, *, credentials_path, row, dedup_key):
+        captured["row"] = row
+        return True
+
+    monkeypatch.setattr(results_export_service.sheets_client, "append_with_retries", fake_append)
+
+    source = "Қазақша бастапқы жауап және русский фрагмент."
+    translation = "Очень длинный перевод. " * 1000
+    await results_export_service.export_question_scores(
+        discipline_id="management",
+        telegram_user_id=1,
+        session_id="sess-1",
+        registration_raw="Менеджмент\nЭкзамен\n101\nИванов Иван",
+        full_transcript=source,
+        scored_rows=[("Q1", "80", source, "Комментарий оценки")],
+        translation_ru=translation,
+        translation_attempted=True,
+    )
+
+    row = captured["row"]
+    assert source in row[9]
+    assert translation not in row[9]
+    assert row[10].startswith("Маршрут дисциплины (бот): Менеджмент\nsession: sess-1\n")
+    assert row[10].index("Перевод на русский:") < row[10].index("Оценивание:")
+    assert "[перевод сокращён из-за размера ячейки]" in row[10]
+    assert "Оценивание:\nВопрос 1: 80" in row[10]
+    assert row[10].endswith("Комментарий оценки")
+    assert len(row[10]) <= sheets_client.RESULT_COMMENT_MAX_CHARS

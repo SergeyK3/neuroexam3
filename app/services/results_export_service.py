@@ -14,6 +14,8 @@ from app.services import reference_map_service
 logger = logging.getLogger(__name__)
 
 _REGISTRATION_NUMBER_RE = re.compile(r"^\s*[1-4](?:[).:;\-]|\s+)\s*(.+?)\s*$")
+_TRANSLATION_UNAVAILABLE = "[Перевод временно недоступен. Исходный ответ сохранён в колонке J.]"
+_TRANSLATION_TRUNCATED = "[перевод сокращён из-за размера ячейки]"
 
 
 def _clean_registration_line(line: str) -> str:
@@ -108,6 +110,43 @@ def _aggregate_rationale(
     return "\n\n".join(blocks).strip()
 
 
+def _compose_comment(
+    evaluation_text: str,
+    *,
+    translation_ru: str | None,
+    translation_attempted: bool,
+    max_chars: int | None = None,
+) -> str:
+    """Собрать K, сохранив оценивание приоритетно в пределах прежних 4000 символов."""
+    evaluation = (evaluation_text or "").strip()
+    if not translation_attempted:
+        return evaluation
+
+    limit = sheets_client.RESULT_COMMENT_MAX_CHARS if max_chars is None else max(0, max_chars)
+    # Если прежний rationale уже занимает лимит, сохраняем прежнее поведение:
+    # build_result_row обрежет только его, без добавления перевода и новых заголовков.
+    if len(evaluation) >= limit:
+        return evaluation
+
+    translation = (translation_ru or "").strip() or _TRANSLATION_UNAVAILABLE
+    prefix = "Перевод на русский:\n"
+    suffix = f"\n\nОценивание:\n{evaluation}"
+    available = limit - len(prefix) - len(suffix)
+
+    if available <= 0:
+        return evaluation
+    if len(translation) <= available:
+        return f"{prefix}{translation}{suffix}"
+
+    marker = _TRANSLATION_TRUNCATED
+    if available < len(marker):
+        return evaluation
+    content_budget = available - len(marker) - 1
+    shortened = translation[: max(0, content_budget)].rstrip()
+    translation_block = f"{shortened}\n{marker}" if shortened else marker
+    return f"{prefix}{translation_block}{suffix}"
+
+
 async def export_question_scores(
     *,
     discipline_id: str | None,
@@ -118,6 +157,8 @@ async def export_question_scores(
     scored_rows: list[tuple[str, str, str, str]],
     telegram_message_id: int | None = None,
     ticket_number: str | None = None,
+    translation_ru: str | None = None,
+    translation_attempted: bool = False,
 ) -> None:
     """
     Для всего ответа студента формирует одну агрегированную строку в Sheets.
@@ -149,6 +190,20 @@ async def export_question_scores(
     course_name, control_type, group_number, student_fio = parse_registration_lines(registration_raw)
     slug = (discipline_id or settings.default_discipline or "").strip() or "-"
     route_label = course_name or slug
+    metadata_block = "\n".join(
+        value
+        for value in (
+            f"Маршрут дисциплины (бот): {route_label}" if route_label else "",
+            f"session: {session_id}" if session_id else "",
+        )
+        if value
+    )
+    rationale_budget = max(
+        0,
+        sheets_client.RESULT_COMMENT_MAX_CHARS
+        - len(metadata_block)
+        - (1 if metadata_block else 0),
+    )
     row = sheets_client.build_result_row(
         telegram_user_id=telegram_user_id,
         session_id=session_id,
@@ -168,7 +223,12 @@ async def export_question_scores(
             ticket_number=ticket_number or "",
             transcript=full_transcript,
         ),
-        rationale=_aggregate_rationale(scored_rows),
+        rationale=_compose_comment(
+            _aggregate_rationale(scored_rows),
+            translation_ru=translation_ru,
+            translation_attempted=translation_attempted,
+            max_chars=rationale_budget,
+        ),
         telegram_message_id=telegram_message_id,
         ticket_number=ticket_number or "",
     )

@@ -1,5 +1,7 @@
 """Точечные тесты форматирования отчета в Telegram."""
 
+import asyncio
+
 import pytest
 
 from app.models.session import ExamSession, ExamState
@@ -362,3 +364,167 @@ async def test_evaluate_and_reply_shows_full_transcript_without_key_lines(monkey
     assert "Это предварительная оценка." in sent[0]
     assert "Окончательную оценку выставляет преподаватель." in sent[0]
     assert exported
+
+
+def _coverage_result() -> CoverageScores:
+    return CoverageScores(
+        score=80,
+        total_elements=1,
+        covered_elements=["смысловой элемент"],
+        partial_elements=[],
+        missing_elements=[],
+        elements=[],
+        general_comment="Ответ оценён.",
+    )
+
+
+async def _run_translation_flow(
+    monkeypatch,
+    *,
+    session_language: str,
+    transcript: str,
+    translator,
+    evaluated: list[str] | None = None,
+    exported: list[dict] | None = None,
+):
+    question = QuestionRecord(question_key="Q1", question_text="Вопрос", reference_answer="Эталон")
+    evaluated = evaluated if evaluated is not None else []
+    exported = exported if exported is not None else []
+
+    async def fake_send(_chat_id: int, _text: str) -> None:
+        return None
+
+    async def fake_candidates(_transcript, _bank, *, expected_count=None):
+        return [question]
+
+    async def fake_bank(_discipline_id, registration_raw=None):
+        return [question]
+
+    async def fake_segment(source: str, _questions, *, use_llm: bool):
+        return ({question.question_key: source}, [])
+
+    async def fake_evaluate(student_answer: str, _reference: str) -> CoverageScores:
+        evaluated.append(student_answer)
+        return _coverage_result()
+
+    async def fake_export(**kwargs) -> None:
+        exported.append(kwargs)
+
+    monkeypatch.setattr("app.integrations.telegram_client.send_message", fake_send)
+    monkeypatch.setattr("app.services.bot_update_handler._candidate_questions_for_transcript", fake_candidates)
+    monkeypatch.setattr("app.services.reference_map_service.get_question_bank", fake_bank)
+    monkeypatch.setattr("app.services.segmentation_service.segment_with_fallback", fake_segment)
+    monkeypatch.setattr("app.services.evaluation_service.use_coverage_scoring", lambda: True)
+    monkeypatch.setattr("app.services.evaluation_service.evaluate_coverage", fake_evaluate)
+    monkeypatch.setattr("app.services.translation_service.translate_to_russian", translator)
+    monkeypatch.setattr("app.services.results_export_service.export_question_scores", fake_export)
+    monkeypatch.setattr(bot_update_handler.settings, "openai_api_key", "test-key")
+
+    await bot_update_handler._evaluate_and_reply(
+        1,
+        transcript,
+        telegram_user_id=1,
+        session_id="sess-translation",
+        session_language=session_language,
+        expected_question_count=1,
+    )
+    return evaluated, exported
+
+
+@pytest.mark.asyncio
+async def test_kk_translates_after_evaluation_and_exports_translation(monkeypatch):
+    source = "Қазақша жауап және русский фрагмент."
+    events: list[str] = []
+
+    async def translator(text: str) -> str:
+        events.append(text)
+        return "Русский связный перевод."
+
+    evaluated, exported = await _run_translation_flow(
+        monkeypatch,
+        session_language="kk",
+        transcript=source,
+        translator=translator,
+    )
+
+    assert evaluated == [source]
+    assert events == [source]
+    assert exported[0]["full_transcript"] == source
+    assert exported[0]["translation_ru"] == "Русский связный перевод."
+    assert exported[0]["translation_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_ru_does_not_call_translation_and_keeps_original_for_evaluation(monkeypatch):
+    source = "Исходный русский ответ."
+
+    async def translator(_text: str) -> str:
+        raise AssertionError("Перевод для ru не должен вызываться")
+
+    evaluated, exported = await _run_translation_flow(
+        monkeypatch,
+        session_language="ru",
+        transcript=source,
+        translator=translator,
+    )
+
+    assert evaluated == [source]
+    assert exported[0]["full_transcript"] == source
+    assert exported[0]["translation_ru"] is None
+    assert exported[0]["translation_attempted"] is False
+
+
+@pytest.mark.asyncio
+async def test_translation_error_does_not_cancel_export(monkeypatch):
+    source = "Қазақша жауап."
+
+    async def translator(_text: str) -> str:
+        raise RuntimeError("translation unavailable")
+
+    evaluated, exported = await _run_translation_flow(
+        monkeypatch,
+        session_language="kk",
+        transcript=source,
+        translator=translator,
+    )
+
+    assert evaluated == [source]
+    assert len(exported) == 1
+    assert exported[0]["translation_ru"] is None
+    assert exported[0]["translation_attempted"] is True
+
+
+@pytest.mark.asyncio
+async def test_translation_cancellation_exports_then_preserves_cancellation(monkeypatch):
+    source = "Қазақша жауап."
+    translation_started = asyncio.Event()
+    evaluated: list[str] = []
+    exported: list[dict] = []
+
+    async def translator(_text: str) -> str:
+        translation_started.set()
+        await asyncio.Future()
+        raise AssertionError("Недостижимый код")
+
+    task = asyncio.create_task(
+        _run_translation_flow(
+            monkeypatch,
+            session_language="kk",
+            transcript=source,
+            translator=translator,
+            evaluated=evaluated,
+            exported=exported,
+        ),
+    )
+    await asyncio.wait_for(translation_started.wait(), timeout=1)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert evaluated == [source]
+    assert len(exported) == 1
+    assert exported[0]["full_transcript"] == source
+    assert exported[0]["translation_ru"] is None
+    assert exported[0]["translation_attempted"] is True
+    assert task.cancelled()

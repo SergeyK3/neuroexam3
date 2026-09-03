@@ -421,6 +421,7 @@ async def append_student_result_row(
 
 # Алматинское время: фиксированное смещение UTC+5 (как у Asia/Almaty, без DST).
 _ALMATY_OFFSET = timedelta(hours=5)
+RESULT_COMMENT_MAX_CHARS = 4000
 
 
 def _answer_started_at_almaty_display() -> str:
@@ -471,7 +472,7 @@ def build_result_row(
             )
             if p
         ),
-        4000,
+        RESULT_COMMENT_MAX_CHARS,
     )
     msg_id = str(telegram_message_id) if telegram_message_id is not None else ""
     return [

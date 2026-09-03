@@ -1,5 +1,6 @@
 """Связка webhook → сессия → FSM → Telegram; голос/текст: Whisper → сегментация по ключам → оценка."""
 
+import asyncio
 import logging
 import re
 import time
@@ -19,6 +20,7 @@ from app.services import (
     segmentation_service,
     session_service,
     speech_service,
+    translation_service,
 )
 from app.services.bot_texts import detect_message_language, t
 from app.services.evaluation_service import CoverageScores
@@ -391,6 +393,7 @@ async def _evaluate_and_reply(
     ticket_number: str | None = None,
     expected_question_count: int | None = None,
     answered_question_count: int | None = None,
+    session_language: str = "ru",
     reply_language: str = "ru",
 ) -> bool:
     """Сегментация по кандидатным вопросам и оценка каждого непустого фрагмента."""
@@ -572,7 +575,26 @@ async def _evaluate_and_reply(
     await telegram_client.send_message(chat_id, "\n".join(lines))
 
     if scored:
-        await results_export_service.export_question_scores(
+        translation_ru: str | None = None
+        translation_cancellation: asyncio.CancelledError | None = None
+        translation_attempted = bot_texts.normalize_lang(session_language) == "kk"
+        if translation_attempted:
+            try:
+                # Перевод выполняется только после оценки и используется только при экспорте.
+                translation_ru = await translation_service.translate_to_russian(transcript)
+            except asyncio.CancelledError as exc:
+                translation_cancellation = exc
+                logger.warning(
+                    "Перевод отменён; результат будет экспортирован до завершения отмены: session_id=%s",
+                    session_id,
+                )
+            except Exception:  # noqa: BLE001 - перевод не должен блокировать сохранение результата
+                logger.exception(
+                    "Не удалось перевести транскрипт для экспорта: session_id=%s transcript_len=%d",
+                    session_id,
+                    len(transcript),
+                )
+        export_call = results_export_service.export_question_scores(
             discipline_id=discipline_id,
             telegram_user_id=telegram_user_id,
             session_id=session_id,
@@ -581,7 +603,24 @@ async def _evaluate_and_reply(
             scored_rows=scored,
             telegram_message_id=telegram_message_id,
             ticket_number=ticket_number,
+            translation_ru=translation_ru,
+            translation_attempted=translation_attempted,
         )
+        if translation_cancellation is None:
+            await export_call
+        else:
+            # Экспорт — короткая критическая секция: shield не снимает отмену, а только
+            # не передаёт её дочерней задаче. После сохранения исходная отмена продолжится.
+            export_task = asyncio.create_task(export_call)
+            while not export_task.done():
+                try:
+                    await asyncio.shield(export_task)
+                except asyncio.CancelledError as exc:
+                    translation_cancellation = exc
+            try:
+                export_task.result()
+            finally:
+                raise translation_cancellation
     return bool(scored)
 
 
@@ -683,6 +722,7 @@ async def _handle_answer_payload(
         ticket_number=sess.ticket_number,
         expected_question_count=expected_count,
         answered_question_count=max(1, min(answered_count, target_count)),
+        session_language=sess.language or "ru",
         reply_language=reply_language,
     )
     sess.pending_transcript = None
