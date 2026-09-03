@@ -36,6 +36,20 @@ def test_translation_system_prompt_preserves_prompt_injection_boundary():
     )
 
 
+def test_translation_prompt_forbids_reconstructing_damaged_question_from_answer_context():
+    prompt = translation_service._TRANSLATION_SYSTEM
+    damaged_question = "Екінші сұрақ. Кучом заключайсы қалечістіні патқот? ..."
+
+    assert damaged_question in prompt
+    assert "Главный объект перевода — содержательный ответ студента" in prompt
+    assert "не реконструируй его по последующему ответу студента" in prompt
+    assert "не подставляй известную предметную формулировку" in prompt
+    assert "сохрани только надёжную служебную часть, например «Второй вопрос.»" in prompt
+    assert "Каковы заключения по количественному подходу?" in prompt
+    assert "не восстанавливай её по контексту последующего ответа" in prompt
+    assert "не удаляя его содержательные слова" in prompt
+
+
 @pytest.mark.asyncio
 async def test_translate_to_russian_sends_full_mixed_transcript(monkeypatch):
     monkeypatch.setattr(settings, "openai_api_key", "sk-test", raising=False)
