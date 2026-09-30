@@ -100,9 +100,9 @@ _TEXTS: dict[str, dict[str, str]] = {
         "en": "Please send the registration details as text (see the list above).",
     },
     "registration_course_not_matched": {
-        "ru": "Название дисциплины не распознано. Отправьте заново все четыре сведения, используя точное название дисциплины преподавателя.",
-        "kk": "Пән атауы танылмады. Оқытушы көрсеткен пәннің дәл атауын қолданып, төрт мәліметті қайта жіберіңіз.",
-        "en": "The course name was not recognized. Send all four details again using the exact course name provided by the teacher.",
+        "ru": "Название дисциплины не распознано. Вид контроля, группа и ФИО сохранены. Отправьте только название дисциплины. Допустимые названия: {courses}",
+        "kk": "Пән атауы танылмады. Бақылау түрі, топ және ТАӘ сақталды. Тек пән атауын жіберіңіз. Рұқсат етілген атаулар: {courses}",
+        "en": "The course name was not recognized. The assessment type, group, and full name were kept. Send only the course name. Allowed names: {courses}",
     },
     "send_nonempty_text": {
         "ru": "Отправьте непустой текст.",

@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
+    _MEDICAL_STATISTICS_COURSE = "медицинская статистика (статистические методы анализа данных)"
+    _MEDICAL_STATISTICS_ALIASES = frozenset(
+        {
+            "мед статистика",
+            "медицинская статистика",
+            "медстатистика",
+        },
+    )
     # Telegram
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = ""
@@ -233,6 +241,23 @@ class Settings(BaseSettings):
         )
         return matched / len(configured_tokens)
 
+    def registration_course_names(self) -> list[str]:
+        """Полные названия дисциплин, допустимые в первой строке регистрации."""
+        raw = (self.discipline_course_name_sheet_ids_json or "").strip()
+        if not raw:
+            return []
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(data, dict):
+            return []
+        return sorted(
+            key.strip()
+            for key, value in data.items()
+            if isinstance(key, str) and key.strip() and isinstance(value, str) and value.strip()
+        )
+
     def spreadsheet_id_for_registration_course(self, registration_raw: str | None) -> str | None:
         """
         Id таблицы по DISCIPLINE_COURSE_NAME_SHEET_IDS_JSON и первой строке регистрации.
@@ -263,6 +288,15 @@ class Settings(BaseSettings):
         cn = self._normalize_course_label(course)
         if cn in norm_map:
             return norm_map[cn]
+
+        # Эти сокращения намеренно распознаются только при наличии ровно этого
+        # полного названия в карте. Они не участвуют в общем fuzzy matching и
+        # потому не могут выбрать другую медицинскую дисциплину по совпадению
+        # отдельных слов.
+        if cn in self._MEDICAL_STATISTICS_ALIASES:
+            medical_statistics_key = self._normalize_course_label(self._MEDICAL_STATISTICS_COURSE)
+            if medical_statistics_key in norm_map:
+                return norm_map[medical_statistics_key]
         best_sid: str | None = None
         best_klen = 0
         for nk, sid in norm_map.items():

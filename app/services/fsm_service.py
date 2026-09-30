@@ -52,7 +52,7 @@ def _fragments_from_message(text: str) -> list[str]:
     if len(lines) > 1:
         return lines
     single = lines[0] if lines else t
-    for sep in (";", "|"):
+    for sep in (";", "|", ","):
         if sep in single:
             parts = [p.strip() for p in single.split(sep) if p.strip()]
             return parts
@@ -178,6 +178,15 @@ def process_message(
             return FsmOutcome(session, [t_("send_nonempty_text", lang)])
 
         numbered = [_strip_registration_number(fragment) for fragment in frags]
+        retrying_course = (
+            len(session.registration_parts) == 4
+            and not session.registration_parts[0].strip()
+        )
+        if retrying_course:
+            # После нераспознанной дисциплины сохранены поля 2…4. Следующее
+            # текстовое сообщение заменяет только первое поле, не сдвигая их.
+            session.registration_parts[0] = numbered[0][1]
+            numbered = []
         # Если после частичного ввода студент снова прислал полный список
         # 1)…4), это исправление регистрации, а не ещё три поля для старого
         # буфера. Полный список атомарно заменяет накопленное значение.
@@ -204,9 +213,21 @@ def process_message(
         registration_raw = "\n".join(session.registration_parts[:4])
         course_map_enabled = bool((settings.discipline_course_name_sheet_ids_json or "").strip())
         if course_map_enabled and settings.spreadsheet_id_for_registration_course(registration_raw) is None:
-            session.registration_parts = []
+            # Не теряем уже полученные контроль, группу и ФИО: повторно нужен
+            # только курс. Пустой первый элемент служит маркером retry.
+            session.registration_parts = ["", *session.registration_parts[1:4]]
             session.registration_raw = None
-            return FsmOutcome(session, [t_("registration_course_not_matched", lang)])
+            course_names = settings.registration_course_names()
+            return FsmOutcome(
+                session,
+                [
+                    t_(
+                        "registration_course_not_matched",
+                        lang,
+                        courses="; ".join(course_names) or "-",
+                    ),
+                ],
+            )
         session.registration_raw = registration_raw
         session.registration_parts = []
         session.state = ExamState.ANSWERING

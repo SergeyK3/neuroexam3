@@ -1,6 +1,7 @@
 """Нечёткое сопоставление названия дисциплины из регистрации с ключами в .env."""
 
 from app.core import config as cfg
+import pytest
 
 
 def test_fuzzy_typo_in_course_name(monkeypatch):
@@ -36,6 +37,39 @@ def test_ai_abbreviation_matches_full_course_name(monkeypatch):
     )
     raw = "ИИ в здравоохранении\nЭкзамен\n1\nИванов"
     assert cfg.settings.spreadsheet_id_for_registration_course(raw) == "id-ai"
+
+
+@pytest.mark.parametrize(
+    "entered",
+    [
+        "Мед статистика",
+        "  МЕДИЦИНСКАЯ   СТАТИСТИКА  ",
+        "Медстатистика",
+    ],
+)
+def test_medical_statistics_aliases_match_only_configured_full_course(monkeypatch, entered):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        (
+            '{"Медицинская статистика (Статистические методы анализа данных)":"id-medstat",'
+            '"Медицинская информатика":"id-medinfo"}'
+        ),
+        raising=False,
+    )
+
+    assert cfg.settings.spreadsheet_id_for_registration_course(entered) == "id-medstat"
+
+
+def test_medical_statistics_alias_does_not_match_without_its_full_course(monkeypatch):
+    monkeypatch.setattr(
+        cfg.settings,
+        "discipline_course_name_sheet_ids_json",
+        '{"Медицинская информатика":"id-medinfo"}',
+        raising=False,
+    )
+
+    assert cfg.settings.spreadsheet_id_for_registration_course("Мед статистика") is None
 
 
 def test_generic_course_words_do_not_select_another_discipline(monkeypatch):
